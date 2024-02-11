@@ -50,7 +50,7 @@ index_opt_field = {ident ~ ":" ~ expr}
 
 WHITESPACE = _{ " " | "\t" | "\r" | "\n" }
 BLOCK_COMMENT = _{ "/*" ~ (BLOCK_COMMENT | !"*/" ~ ANY)* ~ "*/" }
-LINE_COMMENT = _{ SOI ~ "#" ~ (!"\n" ~ ANY)* }
+LINE_COMMENT = _{ "#" ~ (!"\n" ~ ANY)* }
 COMMENT = _{(BLOCK_COMMENT | LINE_COMMENT)}
 
 prog_entry = {"?"}
@@ -181,7 +181,7 @@ raw_string = {
     ~ raw_string_inner
     ~ "\"" ~ POP               // match a quotation mark and the number signs
 }
-raw_string_inner = {
+raw_string_inner = @{
     (
         !("\"" ~ PEEK)    // unless the next character is a quotation mark
                           // followed by the correct amount of number signs,
