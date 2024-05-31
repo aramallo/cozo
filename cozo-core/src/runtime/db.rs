@@ -231,10 +231,22 @@ impl NamedRows {
             next: None,
         })
     }
+
+    /// Create a query and parameters to apply an operation (insert, put, delete, rm) to a stored
+    /// relation with the named rows.
+    pub fn into_payload(self, relation: &str, op: &str) -> Payload {
+        let cols_str = self.headers.join(", ");
+        let query = format!("?[{cols_str}] <- $data :{op} {relation} {{ {cols_str} }}");
+        let data = DataValue::List(self.rows.into_iter().map(|r| DataValue::List(r)).collect());
+        (query, [("data".to_string(), data)].into())
+    }
 }
 
 const STATUS_STR: &str = "status";
 const OK_STR: &str = "OK";
+
+/// The query and parameters.
+pub type Payload = (String, BTreeMap<String, DataValue>);
 
 /// Commands to be sent to a multi-transaction
 #[derive(Eq, PartialEq, Debug)]
@@ -244,7 +256,7 @@ pub enum TransactionPayload {
     /// Abort the current transaction
     Abort,
     /// Run a query inside the transaction
-    Query((String, BTreeMap<String, DataValue>)),
+    Query(Payload),
 }
 
 impl<'s, S: Storage<'s>> Db<S> {
@@ -397,6 +409,7 @@ impl<'s, S: Storage<'s>> Db<S> {
             mutability == ScriptMutability::Immutable,
         )
     }
+
     /// Run the CozoScript passed in. The `params` argument is a map of parameters.
     pub fn run_script_read_only(
         &'s self,
@@ -1764,22 +1777,28 @@ impl<'s, S: Storage<'s>> Db<S> {
         let mut rows = vec![];
         let mut idx = 0;
         for col in &handle.metadata.keys {
+            let default_expr = col.default_gen.as_ref().map(|gen| format!("{}", gen));
+
             rows.push(vec![
                 json!(col.name),
                 json!(true),
                 json!(idx),
                 json!(col.typing.to_string()),
                 json!(col.default_gen.is_some()),
+                json!(default_expr),
             ]);
             idx += 1;
         }
         for col in &handle.metadata.non_keys {
+            let default_expr = col.default_gen.as_ref().map(|gen| format!("{}", gen));
+
             rows.push(vec![
                 json!(col.name),
                 json!(false),
                 json!(idx),
                 json!(col.typing.to_string()),
                 json!(col.default_gen.is_some()),
+                json!(default_expr),
             ]);
             idx += 1;
         }
@@ -1794,6 +1813,7 @@ impl<'s, S: Storage<'s>> Db<S> {
                 "index".to_string(),
                 "type".to_string(),
                 "has_default".to_string(),
+                "default_expr".to_string(),
             ],
             rows,
         ))
