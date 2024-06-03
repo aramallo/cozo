@@ -10,6 +10,8 @@ pub enum StackGraphStorageError {
     IncorrectVersion(usize),
     #[error("database does not exist {0}")]
     MissingDatabase(String),
+    #[error("invalid database tuple")]
+    InvalidTuple,
     #[error(transparent)]
     Serde(#[from] stack_graphs::serde::Error),
     #[error(transparent)]
