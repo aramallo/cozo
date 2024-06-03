@@ -831,6 +831,10 @@ lazy_static! {
                 "Constant".to_string(),
                 Arc::<Box<dyn FixedRule>>::new(Box::new(Constant)),
             ),
+            (
+                "StackGraph".to_string(),
+                Arc::<Box<dyn FixedRule>>::new(Box::new(StackGraphQuery)),
+            ),
         ])
     };
 }
