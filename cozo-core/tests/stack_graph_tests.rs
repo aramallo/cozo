@@ -5,15 +5,35 @@ use std::collections::BTreeMap;
 use std::fs;
 
 fn create_db_schema(db: &mut DbInstance) {
-    // Creates stored relation
+    // Creates stored relations
     db.run_script(
         r#"
-            {:create sg_graph {blob_id: String => repository_id: String, tag: String, error: String?, graph: Bytes}}
+            {:create sg_graph {
+                blob_id: String =>
+                repository_id: String,
+                tag: String,
+                error: String?,
+                graph: Bytes
+            }}
+
+            {:create sg_file_paths {
+                blob_id: String =>
+                repository_id: String,
+                local_id: Int,
+                value: Bytes
+            }}
+
+            {:create sg_root_paths {
+                blob_id: String =>
+                repository_id: String,
+                symbol_stack: String,
+                value: Bytes,
+            }}
             "#,
         Default::default(),
         ScriptMutability::Mutable,
     )
-        .expect("Could not create relation");
+        .expect("Could not create relations");
 }
 
 fn populate_db(db: &mut DbInstance) {
@@ -44,6 +64,9 @@ fn populate_db(db: &mut DbInstance) {
         },
     )]))
         .unwrap();
+
+    // TODO: import sg_file_paths
+    // TODO: import sg_root_paths
 }
 
 #[test]

@@ -60,7 +60,7 @@ impl TryFrom<Tuple> for StackGraphInfo {
         let error = tuple[3].get_str();
         let graph = tuple[4].get_bytes();
 
-        // TODO: remove unwrap
+        // TODO: replace unwrap and handle error
         Ok(Self {
             repository_id: String::from(repository_id.unwrap()),
             blob_id: String::from(blob_id.unwrap()),

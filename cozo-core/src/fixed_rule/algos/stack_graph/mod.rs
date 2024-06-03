@@ -11,6 +11,7 @@ use crate::DataValue;
 use crate::Expr;
 use crate::fixed_rule::algos::stack_graph::augoor_urn::{AugoorUrn, get_node_byte_range};
 use crate::fixed_rule::algos::stack_graph::stack_graph_info::StackGraphInfo;
+use crate::fixed_rule::algos::stack_graph::stack_graph_storage_error::StackGraphStorageError::InvalidTuple;
 use crate::FixedRule;
 use crate::FixedRulePayload;
 use crate::Poison;
@@ -21,6 +22,8 @@ use crate::Symbol;
 mod stack_graph_storage_error;
 mod augoor_urn;
 mod stack_graph_info;
+mod partial_path_file_info;
+mod partial_path_root_info;
 
 pub(crate) struct StackGraphQuery;
 
