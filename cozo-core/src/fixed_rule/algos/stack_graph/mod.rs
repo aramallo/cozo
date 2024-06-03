@@ -48,7 +48,7 @@ impl FixedRule for StackGraphQuery {
         let repository_tuples = repository_param.iter()?.filter_map(Result::ok).collect_vec();
 
         let starting_param = payload.get_input(1)?.ensure_min_len(1)?;
-        let starting_tuple = starting_param.iter()?.filter_map(Result::ok).nth(0)?;
+        let starting_tuple = starting_param.iter()?.filter_map(Result::ok).nth(0).ok_or(InvalidTuple)?;
 
         let reference_urn_string = payload.string_option("reference_urn", None)?;
         let reference_urn = AugoorUrn::from_str(reference_urn_string.as_str()).expect("Invalid URN");
@@ -66,7 +66,7 @@ impl FixedRule for StackGraphQuery {
             if let Some(byte_range) = get_node_byte_range(&stack_graph, handle) {
                 let has_urn = reference_urn.node_has_urn(&stack_graph, handle);
                 if has_urn {
-                    let found_urn = AugoorUrn::new(String::from(stack_graph_info.blob_id.get_str().unwrap()), byte_range);
+                    let found_urn = AugoorUrn::new(stack_graph_info.blob_id.clone(), byte_range);
                     out.put(vec![
                         DataValue::from(found_urn.to_string())
                     ]);
