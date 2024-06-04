@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 
+use itertools::Itertools as _;
 use stack_graphs::{
     arena::Handle,
     graph::{Degree, File, Node, NodeID, StackGraph},
@@ -24,7 +25,7 @@ struct State {
     /// Indexed by Git `BLOB_OID` & local ID
     node_path_blobs: HashMap<NodeID, Vec<Box<[u8]>>>,
     /// Indexed by serialized symbol stacks
-    root_path_blobs: HashMap<Box<str>, Vec<Box<[u8]>>>,
+    root_path_blobs: HashMap<Box<str>, Vec<(Handle<File>, Box<[u8]>)>>,
     graph: StackGraph,
     partials: PartialPaths,
     db: Database,
@@ -116,8 +117,63 @@ impl State {
         symbol_stack: PartialSymbolStack,
         cancellation_flag: &dyn CancellationFlag,
     ) -> Result<()> {
-        // See: https://github.com/github/stack-graphs/blob/2c97ba2/stack-graphs/src/storage.rs#L631
-        todo!()
+        // Adapted from:
+        // https://github.com/github/stack-graphs/blob/2c97ba2/stack-graphs/src/storage.rs#L631
+        let (symbol_stack_patterns, _) = PartialSymbolStackExt(symbol_stack)
+            .storage_key_patterns(&self.graph, &mut self.partials);
+        for symbol_stack in symbol_stack_patterns {
+            // copious_debugging!(
+            //     " * Load extensions from root with prefix symbol stack {}",
+            //     symbol_stack
+            // );
+
+            let Some(blobs) = self
+                .root_path_blobs
+                .get_mut(symbol_stack.as_ref() as &str)
+                .map(|blobs| std::mem::take(blobs))
+            else {
+                // copious_debugging!("   > Already loaded");
+                eprintln!("No root paths for key {:?}", symbol_stack);
+                return Err(StackGraphStorageError::MissingData(format!(
+                    "root paths for symbol stack key {:?}",
+                    symbol_stack
+                )));
+            };
+            if blobs.is_empty() {
+                // copious_debugging!("   > Already loaded");
+                self.stats.root_path_cached += 1;
+                continue;
+            }
+            self.stats.root_path_loads += 1;
+
+            // #[cfg_attr(not(feature = "copious-debugging"), allow(unused))]
+            // let mut count = 0usize;
+
+            for (file, blob) in blobs {
+                cancellation_flag.check("loading root paths")?;
+                Self::load_graph_for_file_inner(
+                    file,
+                    &mut self.graph,
+                    &mut self.graph_blobs,
+                    &mut self.stats,
+                )?;
+                let (path, _): (sg_serde::PartialPath, _) =
+                    bincode::decode_from_slice(&blob, BINCODE_CONFIG)?;
+                let path = path.to_partial_path(&mut self.graph, &mut self.partials)?;
+
+                // copious_debugging!(
+                //     "   > Loaded {}",
+                //     path.display(&self.graph, &mut self.partials)
+                // );
+                // count += 1;
+
+                self.db
+                    .add_partial_path(&self.graph, &mut self.partials, path);
+            }
+
+            // copious_debugging!("   > Loaded {}", count);
+        }
+        Ok(())
     }
 
     pub fn load_partial_path_extensions(
@@ -132,5 +188,62 @@ impl State {
             self.load_paths_for_root(path.symbol_stack_postcondition, cancellation_flag)?;
         }
         Ok(())
+    }
+}
+
+/// Adapted from [Stack Graphs SQLite storage implementation][adapted_from].
+///
+/// [adapted_from]: https://github.com/github/stack-graphs/blob/3c4d1a6/stack-graphs/src/storage.rs#L724
+struct PartialSymbolStackExt(PartialSymbolStack);
+
+// Methods for computing keys and patterns for a symbol stack. The format of a storage key is:
+//
+//     has-var RS ( symbol (US symbol)* )?
+//
+// where has-var is "V" if the symbol stack has a variable, "X" otherwise.
+impl PartialSymbolStackExt {
+    /// Returns a string representation of this symbol stack for indexing in the database.
+    fn storage_key(self, graph: &StackGraph, partials: &mut PartialPaths) -> String {
+        let mut key = String::new();
+        match self.0.has_variable() {
+            true => key += "V\u{241E}",
+            false => key += "X\u{241E}",
+        }
+        key += &self
+            .0
+            .iter(partials)
+            .map(|s| &graph[s.symbol])
+            .join("\u{241F}");
+        key
+    }
+
+    /// Returns string representations for all prefixes of this symbol stack for querying the
+    /// index in the database.
+    fn storage_key_patterns(
+        mut self,
+        graph: &StackGraph,
+        partials: &mut PartialPaths,
+    ) -> (Vec<String>, String) {
+        let mut key_patterns = Vec::new();
+        let mut symbols = String::new();
+        while let Some(symbol) = self.0.pop_front(partials) {
+            if !symbols.is_empty() {
+                symbols += "\u{241F}";
+            }
+            let symbol = graph[symbol.symbol]
+                .replace("%", "\\%")
+                .replace("_", "\\_")
+                .to_string();
+            symbols += &symbol;
+            // patterns for paths matching a prefix of this stack
+            key_patterns.push(format!("V\u{241E}{symbols}"));
+        }
+        // pattern for paths matching exactly this stack
+        key_patterns.push(format!("X\u{241E}{symbols}"));
+        if self.0.has_variable() {
+            // patterns for paths for which this stack is a prefix
+            key_patterns.push(format!("_\u{241E}{symbols}\u{241F}%"));
+        }
+        (key_patterns, "\\".to_string())
     }
 }
