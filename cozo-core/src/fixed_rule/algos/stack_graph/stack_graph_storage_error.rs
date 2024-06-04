@@ -20,6 +20,8 @@ pub enum StackGraphStorageError {
     DeserializeFail(#[from] DecodeError),
     #[error("missing data: {0}")]
     MissingData(String),
+    #[error("misc: {0}")] // TODO: Rewrite to proper variants
+    Misc(String)
 }
 
 pub type Result<T, E = StackGraphStorageError> = std::result::Result<T, E>;

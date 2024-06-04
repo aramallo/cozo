@@ -1,30 +1,19 @@
 use std::collections::BTreeMap;
 
-use itertools::Itertools;
 use miette::Result;
-use smartstring::LazyCompact;
-use smartstring::SmartString;
-use stack_graphs::arena::Handle;
-use stack_graphs::graph::Node;
+use smartstring::{LazyCompact, SmartString};
 
-use crate::DataValue;
-use crate::Expr;
-use crate::fixed_rule::algos::stack_graph::augoor_urn::{AugoorUrn, get_node_byte_range};
-use crate::fixed_rule::algos::stack_graph::stack_graph_info::StackGraphInfo;
-use crate::fixed_rule::algos::stack_graph::stack_graph_storage_error::StackGraphStorageError::InvalidTuple;
-use crate::FixedRule;
-use crate::FixedRulePayload;
-use crate::Poison;
-use crate::RegularTempStore;
-use crate::SourceSpan;
-use crate::Symbol;
+use crate::{
+    DataValue, Expr, FixedRule, FixedRulePayload, Poison, RegularTempStore, SourceSpan, Symbol,
+};
 
+mod augoor_urn;
+mod blobs;
 mod stack_graph_storage_error;
 mod state;
-mod augoor_urn;
-mod stack_graph_info;
-mod partial_path_file_info;
-mod partial_path_root_info;
+
+use augoor_urn::AugoorUrn;
+use stack_graph_storage_error::StackGraphStorageError as Error;
 
 pub(crate) struct StackGraphQuery;
 
@@ -45,38 +34,42 @@ impl FixedRule for StackGraphQuery {
         &self,
         payload: FixedRulePayload<'_, '_>,
         out: &mut RegularTempStore,
-        poison: Poison,
+        _poison: Poison,
     ) -> Result<()> {
-        // Input parameters
-        let repository_param = payload.get_input(0)?.ensure_min_len(1)?;
-        let repository_tuples = repository_param.iter()?.filter_map(Result::ok).collect_vec();
+        use Error as E;
 
-        let starting_param = payload.get_input(1)?.ensure_min_len(1)?;
-        let starting_tuple = starting_param.iter()?.filter_map(Result::ok).nth(0).ok_or(InvalidTuple)?;
+        // Input parameters
+        let graph_blobs = payload.get_input(0)?.ensure_min_len(2)?;
+        let graph_blobs = graph_blobs
+            .iter()?
+            .map(|tuple| tuple.map_err(|e| E::Misc(format!("{e:#}")))?.try_into());
+
+        let node_path_blobs = payload.get_input(1)?.ensure_min_len(3)?;
+        let node_path_blobs = node_path_blobs
+            .iter()?
+            .map(|tuple| tuple.map_err(|e| E::Misc(format!("{e:#}")))?.try_into());
+
+        let root_path_blobs = payload.get_input(1)?.ensure_min_len(3)?;
+        let root_path_blobs = root_path_blobs
+            .iter()?
+            .map(|tuple| tuple.map_err(|e| E::Misc(format!("{e:#}")))?.try_into());
+
+        let mut state = state::State::new(graph_blobs, node_path_blobs, root_path_blobs)?;
 
         let reference_urn_string = payload.string_option("reference_urn", None)?;
-        let reference_urn = reference_urn_string.as_str().parse::<AugoorUrn>().expect("Invalid URN");
-
-        // Reads input graph
-        let stack_graph_info = StackGraphInfo::try_from(starting_tuple)?;
-        let stack_graph = stack_graph_info.read_stack_graph()?;
+        let reference_urn = reference_urn_string
+            .as_str()
+            .parse::<AugoorUrn>()
+            .expect("Invalid URN");
 
         // Some placeholder code that demonstrates using a stack graph
         // This exists only temporarily to demonstrate that:
         // - stack graphs can be deserialized
         // - the deserialized stack graph works
         // - it is possible to use an Augoor KG URN as a starting point for a query
-        stack_graph.iter_nodes().for_each(|handle: Handle<Node>| {
-            if let Some(byte_range) = get_node_byte_range(&stack_graph, handle) {
-                let has_urn = reference_urn.node_has_urn(&stack_graph, handle);
-                if has_urn {
-                    let found_urn = AugoorUrn::new(stack_graph_info.file.clone(), byte_range);
-                    out.put(vec![
-                        DataValue::from(found_urn.to_string())
-                    ]);
-                }
-            }
-        });
+        if state.get_node(&reference_urn).is_some() {
+            out.put(vec![DataValue::from(reference_urn.to_string())])
+        }
 
         Ok(())
     }
@@ -86,6 +79,8 @@ struct PoisonCancellation(Poison);
 
 impl stack_graphs::CancellationFlag for PoisonCancellation {
     fn check(&self, at: &'static str) -> Result<(), stack_graphs::CancellationError> {
-        self.0.check().map_err(|_| stack_graphs::CancellationError(at))
+        self.0
+            .check()
+            .map_err(|_| stack_graphs::CancellationError(at))
     }
 }

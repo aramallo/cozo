@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::{collections::HashMap, ops::Range as StdRange};
 
 use itertools::Itertools as _;
 use stack_graphs::{
@@ -10,7 +10,11 @@ use stack_graphs::{
     CancellationFlag,
 };
 
-use super::stack_graph_storage_error::{Result, StackGraphStorageError};
+use super::{
+    augoor_urn::AugoorUrn,
+    blobs::{GraphBlob, NodePathBlob, RootPathBlob},
+    stack_graph_storage_error::{Result, StackGraphStorageError as Error},
+};
 
 type Blob = Box<[u8]>;
 
@@ -21,14 +25,14 @@ type Blob = Box<[u8]>;
 /// parsed, and integrated into `graph`, `partials`, and/or `db`. When a key
 /// for one of the `*_blobs` collections exists but its value is empty, that
 /// means the data has already been loaded.
-struct State {
+pub(super) struct State {
     /// Indexed by Git `BLOB_OID`
     graph_blobs: HashMap<Handle<File>, LoadState<Blob>>,
     /// Indexed by Git `BLOB_OID` & local ID
     node_path_blobs: HashMap<NodeID, LoadState<Vec<Blob>>>,
     /// Indexed by serialized symbol stacks
     root_path_blobs: HashMap<Box<str>, LoadState<Vec<(Handle<File>, Blob)>>>,
-    graph: StackGraph,
+    pub(super) graph: StackGraph,
     partials: PartialPaths,
     db: Database,
     stats: Stats,
@@ -41,8 +45,96 @@ enum LoadState<T> {
 
 impl<T> LoadState<T> {
     fn load(&mut self) -> Option<T> {
-        let Self::Unloaded(unloaded) = std::mem::replace(self, Self::Loaded) else { return None };
-        return Some(unloaded)
+        let Self::Unloaded(unloaded) = std::mem::replace(self, Self::Loaded) else {
+            return None;
+        };
+        Some(unloaded)
+    }
+}
+
+impl State {
+    pub(super) fn new(
+        graph_blobs: impl Iterator<Item = Result<GraphBlob>>,
+        node_path_blobs: impl Iterator<Item = Result<NodePathBlob>>,
+        root_path_blobs: impl Iterator<Item = Result<RootPathBlob>>,
+    ) -> Result<Self> {
+        let mut graph = StackGraph::new();
+
+        let graph_blobs = graph_blobs
+            .map(|graph_blob| {
+                let graph_blob = graph_blob?;
+                let file = graph
+                    .add_file(&graph_blob.file_id)
+                    .map_err(|_existing_file| {
+                        Error::Misc(format!(
+                            "file with ID {:?} already exists",
+                            graph_blob.file_id
+                        ))
+                    })?;
+                Result::Ok((file, LoadState::Unloaded(graph_blob.blob)))
+            })
+            .collect::<Result<_, Error>>()?;
+
+        let mut indexed_node_path_blobs = HashMap::new();
+        for node_path_blob in node_path_blobs {
+            let node_path_blob = node_path_blob?;
+            let file = graph.get_file(&node_path_blob.file_id).ok_or_else(|| {
+                Error::Misc(format!(
+                    "no known file with ID {:?}",
+                    node_path_blob.file_id
+                ))
+            })?;
+            let node_id = NodeID::new_in_file(file, node_path_blob.start_node_local_id);
+            let LoadState::Unloaded(blobs) = indexed_node_path_blobs
+                .entry(node_id)
+                .or_insert_with(|| LoadState::Unloaded(Vec::new()))
+            else {
+                unreachable!()
+            };
+            blobs.push(node_path_blob.blob);
+        }
+
+        let mut indexed_root_path_blobs = HashMap::new();
+        for root_path_blob in root_path_blobs {
+            let root_path_blob = root_path_blob?;
+            let file = graph.get_file(&root_path_blob.file_id).ok_or_else(|| {
+                Error::Misc(format!(
+                    "no known file with ID {:?}",
+                    root_path_blob.file_id
+                ))
+            })?;
+            let LoadState::Unloaded(files_blobs) = indexed_root_path_blobs
+                .entry(root_path_blob.precondition_symbol_stack)
+                .or_insert_with(|| LoadState::Unloaded(Vec::new()))
+            else {
+                unreachable!()
+            };
+            files_blobs.push((file, root_path_blob.blob));
+        }
+
+        Ok(Self {
+            graph_blobs,
+            node_path_blobs: indexed_node_path_blobs,
+            root_path_blobs: indexed_root_path_blobs,
+            graph,
+            partials: PartialPaths::new(),
+            db: Database::new(),
+            stats: Stats::default(),
+        })
+    }
+
+    pub(super) fn get_node(&mut self, urn: &AugoorUrn) -> Option<Handle<Node>> {
+        let file = self.graph.get_file(&urn.file_id)?;
+        Self::load_graph_for_file_inner(
+            file,
+            &mut self.graph,
+            &mut self.graph_blobs,
+            &mut self.stats,
+        )
+        .ok();
+        self.graph
+            .nodes_for_file(file)
+            .find(|&node| node_byte_range(&self.graph, node).is_some_and(|r| r == urn.byte_range))
     }
 }
 
@@ -56,14 +148,12 @@ pub struct Stats {
     pub node_path_cached: usize,
 }
 
-impl ForwardCandidates<Handle<PartialPath>, PartialPath, Database, StackGraphStorageError>
-    for State
-{
+impl ForwardCandidates<Handle<PartialPath>, PartialPath, Database, Error> for State {
     fn load_forward_candidates(
         &mut self,
         path: &PartialPath,
         cancellation_flag: &dyn stack_graphs::CancellationFlag,
-    ) -> Result<(), StackGraphStorageError> {
+    ) -> Result<()> {
         self.load_partial_path_extensions(path, cancellation_flag)
     }
 
@@ -98,7 +188,7 @@ impl State {
         let Some(blob) = graph_blobs.get_mut(&file) else {
             // copious_debugging!("   > Already loaded");
             eprintln!("No graph for key {file:?}");
-            return Err(StackGraphStorageError::MissingData(format!(
+            return Err(Error::MissingData(format!(
                 "graph for file key {:?}",
                 graph[file].name(),
             )));
@@ -132,14 +222,12 @@ impl State {
 
         let Some(blobs_load_state) = self.node_path_blobs.get_mut(&id) else {
             eprintln!("No file paths for key {id:?}");
-            return Err(StackGraphStorageError::MissingData(format!(
-                "file paths for key {id:?}"
-            )));
+            return Err(Error::MissingData(format!("file paths for key {id:?}")));
         };
 
         let Some(blobs) = blobs_load_state.load() else {
             eprintln!("No file paths for key {:?}", id);
-            self.stats.root_path_cached += 1;
+            self.stats.node_path_cached += 1;
             return Ok(());
         };
 
@@ -193,7 +281,7 @@ impl State {
             else {
                 // copious_debugging!("   > Already loaded");
                 eprintln!("No root paths for key {:?}", symbol_stack);
-                return Err(StackGraphStorageError::MissingData(format!(
+                return Err(Error::MissingData(format!(
                     "root paths for symbol stack key {:?}",
                     symbol_stack
                 )));
@@ -291,8 +379,8 @@ impl PartialSymbolStackExt {
                 symbols += "\u{241F}";
             }
             let symbol = graph[symbol.symbol]
-                .replace("%", "\\%")
-                .replace("_", "\\_")
+                .replace('%', "\\%")
+                .replace('_', "\\_")
                 .to_string();
             symbols += &symbol;
             // patterns for paths matching a prefix of this stack
@@ -305,5 +393,26 @@ impl PartialSymbolStackExt {
             key_patterns.push(format!("_\u{241E}{symbols}\u{241F}%"));
         }
         (key_patterns, "\\".to_string())
+    }
+}
+
+pub fn node_byte_range(
+    stack_graph: &StackGraph,
+    stack_graph_node: Handle<Node>,
+) -> Option<StdRange<u32>> {
+    fn lsp_position_to_byte_offset(position: &lsp_positions::Position) -> u32 {
+        let line_start = position.containing_line.start;
+        let line_offset = position.column.utf8_offset;
+        (line_start + line_offset) as u32
+    }
+
+    let source_info = stack_graph.source_info(stack_graph_node)?;
+    let start = lsp_position_to_byte_offset(&source_info.span.start);
+    let end = lsp_position_to_byte_offset(&source_info.span.end);
+
+    if start == 0 && end == 0 {
+        None
+    } else {
+        Some(start..end)
     }
 }
