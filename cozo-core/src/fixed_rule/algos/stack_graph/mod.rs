@@ -20,6 +20,7 @@ use crate::SourceSpan;
 use crate::Symbol;
 
 mod stack_graph_storage_error;
+mod state;
 mod augoor_urn;
 mod stack_graph_info;
 mod partial_path_file_info;
