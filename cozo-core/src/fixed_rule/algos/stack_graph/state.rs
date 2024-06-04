@@ -45,27 +45,28 @@ pub struct Stats {
 impl ForwardCandidates<Handle<PartialPath>, PartialPath, Database, StackGraphStorageError>
     for State
 {
-    fn get_forward_candidates<R>(&mut self, path: &PartialPath, result: &mut R)
-    where
-        R: std::iter::Extend<Handle<PartialPath>>,
-    {
-        todo!()
-    }
-
-    fn get_joining_candidate_degree(&self, path: &PartialPath) -> Degree {
-        todo!()
-    }
-
-    fn get_graph_partials_and_db(&mut self) -> (&StackGraph, &mut PartialPaths, &Database) {
-        todo!()
-    }
-
     fn load_forward_candidates(
         &mut self,
         path: &PartialPath,
         cancellation_flag: &dyn stack_graphs::CancellationFlag,
     ) -> Result<(), StackGraphStorageError> {
         self.load_partial_path_extensions(path, cancellation_flag)
+    }
+
+    fn get_forward_candidates<R>(&mut self, path: &PartialPath, result: &mut R)
+    where
+        R: std::iter::Extend<Handle<PartialPath>>,
+    {
+        self.db
+            .find_candidate_partial_paths(&self.graph, &mut self.partials, path, result);
+    }
+
+    fn get_joining_candidate_degree(&self, path: &PartialPath) -> Degree {
+        self.db.get_incoming_path_degree(path.end_node)
+    }
+
+    fn get_graph_partials_and_db(&mut self) -> (&StackGraph, &mut PartialPaths, &Database) {
+        (&self.graph, &mut self.partials, &self.db)
     }
 }
 
