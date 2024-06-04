@@ -19,3 +19,5 @@ pub enum StackGraphStorageError {
     #[error(transparent)]
     DeserializeFail(#[from] DecodeError),
 }
+
+pub type Result<T, E = StackGraphStorageError> = std::result::Result<T, E>;
