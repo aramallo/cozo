@@ -27,7 +27,7 @@ struct State {
     /// Indexed by Git `BLOB_OID` & local ID
     node_path_blobs: HashMap<NodeID, BlobsLoadState>,
     /// Indexed by serialized symbol stacks
-    root_path_blobs: HashMap<Box<str>, Vec<(Handle<File>, Blob)>>,
+    root_path_blobs: HashMap<Box<str>, BlobsLoadState>,
     graph: StackGraph,
     partials: PartialPaths,
     db: Database,
@@ -130,7 +130,7 @@ impl State {
         };
 
         let blobs_load_state = std::mem::replace(blobs_load_state, BlobsLoadState::Loaded);
-        let BlobsLoadState::Unloaded(paths) = blobs_load_state else {
+        let BlobsLoadState::Unloaded(blobs) = blobs_load_state else {
             eprintln!("No file paths for key {:?}", id);
             self.stats.root_path_cached += 1;
             return Ok(());
@@ -141,9 +141,9 @@ impl State {
         // #[cfg_attr(not(feature = "copious-debugging"), allow(unused))]
         // let mut count = 0usize;
 
-        for path in paths {
-            cancellation_flag.check("loading node paths")?;
-            let (file, value) = path;
+        for blob in blobs {
+            cancellation_flag.check("loading file paths")?;
+            let (file, value) = blob;
             Self::load_graph_for_file_inner(
                 file,
                 &mut self.graph,
@@ -182,10 +182,8 @@ impl State {
             //     symbol_stack
             // );
 
-            let Some(blobs) = self
-                .root_path_blobs
-                .get_mut(symbol_stack.as_ref() as &str)
-                .map(|blobs| std::mem::take(blobs))
+            let Some(blobs_load_state) =
+                self.root_path_blobs.get_mut(symbol_stack.as_ref() as &str)
             else {
                 // copious_debugging!("   > Already loaded");
                 eprintln!("No root paths for key {:?}", symbol_stack);
@@ -194,11 +192,12 @@ impl State {
                     symbol_stack
                 )));
             };
-            if blobs.is_empty() {
+            let blobs_load_state = std::mem::replace(blobs_load_state, BlobsLoadState::Loaded);
+            let BlobsLoadState::Unloaded(blobs) = blobs_load_state else {
                 // copious_debugging!("   > Already loaded");
                 self.stats.root_path_cached += 1;
                 continue;
-            }
+            };
             self.stats.root_path_loads += 1;
 
             // #[cfg_attr(not(feature = "copious-debugging"), allow(unused))]
