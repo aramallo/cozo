@@ -33,7 +33,7 @@ impl StackGraphInfo {
 
     pub fn read_stack_graph(&self) -> Result<StackGraph, StackGraphStorageError> {
         let (serde_graph, _bytes_read): (stack_graphs::serde::StackGraph, usize) =
-            bincode::decode_from_slice(&*self.graph, BINCODE_CONFIG)
+            bincode::decode_from_slice(&self.graph, BINCODE_CONFIG)
                 .map_err(StackGraphStorageError::from)?;
 
         let mut stack_graph = stack_graphs::graph::StackGraph::new();

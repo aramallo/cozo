@@ -54,7 +54,7 @@ impl FixedRule for StackGraphQuery {
         let starting_tuple = starting_param.iter()?.filter_map(Result::ok).nth(0).ok_or(InvalidTuple)?;
 
         let reference_urn_string = payload.string_option("reference_urn", None)?;
-        let reference_urn = AugoorUrn::from_str(reference_urn_string.as_str()).expect("Invalid URN");
+        let reference_urn = reference_urn_string.as_str().parse::<AugoorUrn>().expect("Invalid URN");
 
         // Reads input graph
         let stack_graph_info = StackGraphInfo::try_from(starting_tuple)?;

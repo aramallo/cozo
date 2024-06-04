@@ -1,4 +1,4 @@
-use std::fmt::Display;
+use std::{fmt::Display, str::FromStr};
 use std::ops::Range;
 use stack_graphs::arena::Handle;
 use stack_graphs::graph::{Node, StackGraph};
@@ -26,7 +26,7 @@ pub fn get_node_byte_range(
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct AugoorUrn {
     pub blob_id: String,
     pub byte_range: Range<u32>,
@@ -40,7 +40,22 @@ impl AugoorUrn {
         }
     }
 
-    pub fn from_str(s: &str) -> Result<Self, String> {
+    pub fn node_has_urn(
+        &self,
+        stack_graph: &StackGraph,
+        stack_graph_node: Handle<Node>,
+    ) -> bool {
+        if let Some(byte_range) = get_node_byte_range(stack_graph, stack_graph_node) {
+            byte_range == self.byte_range
+        } else {
+            false
+        }
+    }
+}
+
+impl FromStr for AugoorUrn {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, String> {
         let parts: Vec<&str> = s.split(':').collect();
 
         if parts.len() != 5 {
@@ -57,18 +72,6 @@ impl AugoorUrn {
             blob_id,
             byte_range: start_byte..end_byte,
         })
-    }
-
-    pub fn node_has_urn(
-        &self,
-        stack_graph: &StackGraph,
-        stack_graph_node: Handle<Node>,
-    ) -> bool {
-        if let Some(byte_range) = get_node_byte_range(stack_graph, stack_graph_node) {
-            byte_range == self.byte_range
-        } else {
-            false
-        }
     }
 }
 
