@@ -10,7 +10,7 @@ pub struct PartialPathFileInfo {
 
 impl PartialPathFileInfo {
     pub fn new(
-        blob_id: String,
+        file: String,
         local_id: u32,
         value: Vec<u8>,
     ) -> Self {
