@@ -49,7 +49,9 @@ impl TryFrom<Tuple> for NodePathBlob {
 
         // TODO: More specific errors (e.g. “InvalidTupleElemType”)?
         let file_id = tuple[0].get_str().ok_or(Self::Error::InvalidTuple)?;
-        let start_node_local_id = tuple[1].get_int().ok_or(Self::Error::InvalidTuple)?;
+        let start_node_local_id = tuple[1]
+            .get_non_neg_int()
+            .ok_or(Self::Error::InvalidTuple)?;
         let start_node_local_id = start_node_local_id
             .try_into()
             .map_err(|_| Self::Error::InvalidTuple)?;
