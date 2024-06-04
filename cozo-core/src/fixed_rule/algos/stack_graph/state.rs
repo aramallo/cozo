@@ -12,6 +12,8 @@ use stack_graphs::{
 
 use super::stack_graph_storage_error::{Result, StackGraphStorageError};
 
+type Blob = Box<[u8]>;
+
 /// State for a definition query. Fixed rules cannot themselves load data, so
 /// all data they might need must be provid. The `*_blobs` fields hold binary
 /// blobs representing partial graphs or paths that have not yet been “loaded”;
@@ -21,11 +23,11 @@ use super::stack_graph_storage_error::{Result, StackGraphStorageError};
 /// means the data has already been loaded.
 struct State {
     /// Indexed by Git `BLOB_OID`
-    graph_blobs: HashMap<Handle<File>, Option<Box<[u8]>>>,
+    graph_blobs: HashMap<Handle<File>, Option<Blob>>,
     /// Indexed by Git `BLOB_OID` & local ID
-    node_path_blobs: HashMap<NodeID, Vec<Box<[u8]>>>,
+    node_path_blobs: HashMap<NodeID, Vec<Blob>>,
     /// Indexed by serialized symbol stacks
-    root_path_blobs: HashMap<Box<str>, Vec<(Handle<File>, Box<[u8]>)>>,
+    root_path_blobs: HashMap<Box<str>, Vec<(Handle<File>, Blob)>>,
     graph: StackGraph,
     partials: PartialPaths,
     db: Database,
@@ -76,7 +78,7 @@ impl State {
     fn load_graph_for_file_inner(
         file: Handle<File>,
         graph: &mut StackGraph,
-        graph_blobs: &mut HashMap<Handle<File>, Option<Box<[u8]>>>,
+        graph_blobs: &mut HashMap<Handle<File>, Option<Blob>>,
         stats: &mut Stats,
     ) -> Result<()> {
         // copious_debugging!("--> Load graph for {}", file);
