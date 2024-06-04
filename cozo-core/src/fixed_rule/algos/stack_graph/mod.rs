@@ -80,3 +80,11 @@ impl FixedRule for StackGraphQuery {
         Ok(())
     }
 }
+
+struct PoisonCancellation(Poison);
+
+impl stack_graphs::CancellationFlag for PoisonCancellation {
+    fn check(&self, at: &'static str) -> Result<(), stack_graphs::CancellationError> {
+        self.0.check().map_err(|_| stack_graphs::CancellationError(at))
+    }
+}
