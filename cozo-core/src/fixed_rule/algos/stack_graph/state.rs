@@ -23,20 +23,27 @@ type Blob = Box<[u8]>;
 /// means the data has already been loaded.
 struct State {
     /// Indexed by Git `BLOB_OID`
-    graph_blobs: HashMap<Handle<File>, Option<Blob>>,
+    graph_blobs: HashMap<Handle<File>, LoadState<Blob>>,
     /// Indexed by Git `BLOB_OID` & local ID
-    node_path_blobs: HashMap<NodeID, BlobsLoadState>,
+    node_path_blobs: HashMap<NodeID, LoadState<Vec<Blob>>>,
     /// Indexed by serialized symbol stacks
-    root_path_blobs: HashMap<Box<str>, BlobsLoadState>,
+    root_path_blobs: HashMap<Box<str>, LoadState<Vec<(Handle<File>, Blob)>>>,
     graph: StackGraph,
     partials: PartialPaths,
     db: Database,
     stats: Stats,
 }
 
-enum BlobsLoadState {
-    Unloaded(Vec<(Handle<File>, Blob)>),
+enum LoadState<T> {
+    Unloaded(T),
     Loaded,
+}
+
+impl<T> LoadState<T> {
+    fn load(&mut self) -> Option<T> {
+        let Self::Unloaded(unloaded) = std::mem::replace(self, Self::Loaded) else { return None };
+        return Some(unloaded)
+    }
 }
 
 #[derive(Clone, Debug, Default)]
@@ -83,7 +90,7 @@ impl State {
     fn load_graph_for_file_inner(
         file: Handle<File>,
         graph: &mut StackGraph,
-        graph_blobs: &mut HashMap<Handle<File>, Option<Blob>>,
+        graph_blobs: &mut HashMap<Handle<File>, LoadState<Blob>>,
         stats: &mut Stats,
     ) -> Result<()> {
         // copious_debugging!("--> Load graph for {}", file);
@@ -97,7 +104,7 @@ impl State {
             )));
         };
 
-        let Some(blob) = blob.take() else {
+        let Some(blob) = blob.load() else {
             // copious_debugging!(" * Already loaded");
             stats.file_cached += 1;
             return Ok(());
@@ -121,6 +128,7 @@ impl State {
 
         // copious_debugging!(" * Load extensions from node {}", node.display(&self.graph));
         let id = self.graph[node].id();
+        let Some(file) = id.file() else { return Ok(()) };
 
         let Some(blobs_load_state) = self.node_path_blobs.get_mut(&id) else {
             eprintln!("No file paths for key {id:?}");
@@ -129,8 +137,7 @@ impl State {
             )));
         };
 
-        let blobs_load_state = std::mem::replace(blobs_load_state, BlobsLoadState::Loaded);
-        let BlobsLoadState::Unloaded(blobs) = blobs_load_state else {
+        let Some(blobs) = blobs_load_state.load() else {
             eprintln!("No file paths for key {:?}", id);
             self.stats.root_path_cached += 1;
             return Ok(());
@@ -143,7 +150,6 @@ impl State {
 
         for blob in blobs {
             cancellation_flag.check("loading file paths")?;
-            let (file, value) = blob;
             Self::load_graph_for_file_inner(
                 file,
                 &mut self.graph,
@@ -151,7 +157,7 @@ impl State {
                 &mut self.stats,
             )?;
             let (path, _): (sg_serde::PartialPath, _) =
-                bincode::decode_from_slice(&value, BINCODE_CONFIG)?;
+                bincode::decode_from_slice(&blob, BINCODE_CONFIG)?;
             let path = path.to_partial_path(&mut self.graph, &mut self.partials)?;
 
             // copious_debugging!(
@@ -192,8 +198,8 @@ impl State {
                     symbol_stack
                 )));
             };
-            let blobs_load_state = std::mem::replace(blobs_load_state, BlobsLoadState::Loaded);
-            let BlobsLoadState::Unloaded(blobs) = blobs_load_state else {
+
+            let Some(blobs) = blobs_load_state.load() else {
                 // copious_debugging!("   > Already loaded");
                 self.stats.root_path_cached += 1;
                 continue;
