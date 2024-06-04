@@ -25,13 +25,18 @@ struct State {
     /// Indexed by Git `BLOB_OID`
     graph_blobs: HashMap<Handle<File>, Option<Blob>>,
     /// Indexed by Git `BLOB_OID` & local ID
-    node_path_blobs: HashMap<NodeID, Vec<Blob>>,
+    node_path_blobs: HashMap<NodeID, BlobsLoadState>,
     /// Indexed by serialized symbol stacks
     root_path_blobs: HashMap<Box<str>, Vec<(Handle<File>, Blob)>>,
     graph: StackGraph,
     partials: PartialPaths,
     db: Database,
     stats: Stats,
+}
+
+enum BlobsLoadState {
+    Unloaded(Vec<(Handle<File>, Blob)>),
+    Loaded,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -111,8 +116,55 @@ impl State {
         node: Handle<Node>,
         cancellation_flag: &dyn CancellationFlag,
     ) -> Result<()> {
-        // See: https://github.com/github/stack-graphs/blob/2c97ba2/stack-graphs/src/storage.rs#L580
-        todo!()
+        // Adapted from:
+        // https://github.com/github/stack-graphs/blob/2c97ba2/stack-graphs/src/storage.rs#L580
+
+        // copious_debugging!(" * Load extensions from node {}", node.display(&self.graph));
+        let id = self.graph[node].id();
+
+        let Some(blobs_load_state) = self.node_path_blobs.get_mut(&id) else {
+            eprintln!("No file paths for key {id:?}");
+            return Err(StackGraphStorageError::MissingData(format!(
+                "file paths for key {id:?}"
+            )));
+        };
+
+        let blobs_load_state = std::mem::replace(blobs_load_state, BlobsLoadState::Loaded);
+        let BlobsLoadState::Unloaded(paths) = blobs_load_state else {
+            eprintln!("No file paths for key {:?}", id);
+            self.stats.root_path_cached += 1;
+            return Ok(());
+        };
+
+        self.stats.node_path_loads += 1;
+
+        // #[cfg_attr(not(feature = "copious-debugging"), allow(unused))]
+        // let mut count = 0usize;
+
+        for path in paths {
+            cancellation_flag.check("loading node paths")?;
+            let (file, value) = path;
+            Self::load_graph_for_file_inner(
+                file,
+                &mut self.graph,
+                &mut self.graph_blobs,
+                &mut self.stats,
+            )?;
+            let (path, _): (sg_serde::PartialPath, _) =
+                bincode::decode_from_slice(&value, BINCODE_CONFIG)?;
+            let path = path.to_partial_path(&mut self.graph, &mut self.partials)?;
+
+            // copious_debugging!(
+            //     "   > Loaded {}",
+            //     path.display(&self.graph, &mut self.partials)
+            // );
+            // count += 1;
+
+            self.db
+                .add_partial_path(&self.graph, &mut self.partials, path);
+        }
+        // copious_debugging!("   > Loaded {}", count);
+        Ok(())
     }
 
     fn load_paths_for_root(
