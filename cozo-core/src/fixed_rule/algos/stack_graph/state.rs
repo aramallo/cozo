@@ -14,14 +14,15 @@ use super::stack_graph_storage_error::{Result, StackGraphStorageError};
 /// all data they might need must be provid. The `*_blobs` fields hold binary
 /// blobs representing partial graphs or paths that have not yet been “loaded”;
 /// whenever one is needed it is removed from the corresponding collection,
-/// parsed, and integrated into `graph`, `partials`, and/or `db`.
+/// parsed, and integrated into `graph`, `partials`, and/or `db`. When the
+/// value for the `*_blob` is empty it means the data has already been loaded.
 struct State {
     /// Indexed by Git `BLOB_OID`
-    graph_blobs: HashMap<Handle<File>, Box<[u8]>>,
+    graph_blobs: HashMap<Handle<File>, Option<Box<[u8]>>>,
     /// Indexed by Git `BLOB_OID` & local ID
-    node_path_blobs: HashMap<NodeID, Box<[Box<[u8]>]>>,
+    node_path_blobs: HashMap<NodeID, Vec<Box<[u8]>>>,
     /// Indexed by serialized symbol stacks
-    root_path_blobs: HashMap<Box<str>, Box<[Box<[u8]>]>>,
+    root_path_blobs: HashMap<Box<str>, Vec<Box<[u8]>>>,
     graph: StackGraph,
     partials: PartialPaths,
     db: Database,
