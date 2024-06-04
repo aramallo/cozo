@@ -4,6 +4,7 @@ use stack_graphs::{
     arena::Handle,
     graph::{Degree, File, Node, NodeID, StackGraph},
     partial::{PartialPath, PartialPaths, PartialSymbolStack},
+    serde as sg_serde,
     stitching::{Database, ForwardCandidates},
     CancellationFlag,
 };
@@ -67,7 +68,40 @@ impl ForwardCandidates<Handle<PartialPath>, PartialPath, Database, StackGraphSto
     }
 }
 
+pub static BINCODE_CONFIG: bincode::config::Configuration = bincode::config::standard();
+
 impl State {
+    fn load_graph_for_file_inner(
+        file: Handle<File>,
+        graph: &mut StackGraph,
+        graph_blobs: &mut HashMap<Handle<File>, Option<Box<[u8]>>>,
+        stats: &mut Stats,
+    ) -> Result<()> {
+        // copious_debugging!("--> Load graph for {}", file);
+
+        let Some(blob) = graph_blobs.get_mut(&file) else {
+            // copious_debugging!("   > Already loaded");
+            eprintln!("No graph for key {file:?}");
+            return Err(StackGraphStorageError::MissingData(format!(
+                "graph for file key {:?}",
+                graph[file].name(),
+            )));
+        };
+
+        let Some(blob) = blob.take() else {
+            // copious_debugging!(" * Already loaded");
+            stats.file_cached += 1;
+            return Ok(());
+        };
+
+        // copious_debugging!(" * Load from database");
+        stats.file_loads += 1;
+        let (file_graph, _): (sg_serde::StackGraph, _) =
+            bincode::decode_from_slice(&blob, BINCODE_CONFIG)?;
+        file_graph.load_into(graph)?;
+        Ok(())
+    }
+
     fn load_paths_for_node(
         &mut self,
         node: Handle<Node>,

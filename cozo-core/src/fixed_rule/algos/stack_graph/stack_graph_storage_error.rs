@@ -18,6 +18,14 @@ pub enum StackGraphStorageError {
     SerializeFail(#[from] EncodeError),
     #[error(transparent)]
     DeserializeFail(#[from] DecodeError),
+    #[error("missing data: {0}")]
+    MissingData(String),
 }
 
 pub type Result<T, E = StackGraphStorageError> = std::result::Result<T, E>;
+
+impl From<stack_graphs::CancellationError> for StackGraphStorageError {
+    fn from(err: stack_graphs::CancellationError) -> Self {
+        Self::Cancelled(err.0)
+    }
+}
