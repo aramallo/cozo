@@ -69,7 +69,7 @@ impl FixedRule for StackGraphQuery {
             if let Some(byte_range) = get_node_byte_range(&stack_graph, handle) {
                 let has_urn = reference_urn.node_has_urn(&stack_graph, handle);
                 if has_urn {
-                    let found_urn = AugoorUrn::new(stack_graph_info.blob_id.clone(), byte_range);
+                    let found_urn = AugoorUrn::new(stack_graph_info.file.clone(), byte_range);
                     out.put(vec![
                         DataValue::from(found_urn.to_string())
                     ]);

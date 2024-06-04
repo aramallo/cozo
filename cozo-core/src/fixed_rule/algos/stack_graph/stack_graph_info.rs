@@ -7,8 +7,7 @@ use crate::fixed_rule::algos::stack_graph::stack_graph_storage_error::StackGraph
 pub static BINCODE_CONFIG: config::Configuration = config::standard();
 
 pub struct StackGraphInfo {
-    pub repository_id: String,
-    pub blob_id: String,
+    pub file: String,
     pub tag: String,
     pub error: Option<String>,
     graph: Vec<u8>,
@@ -16,15 +15,13 @@ pub struct StackGraphInfo {
 
 impl StackGraphInfo {
     pub fn new(
-        repository_id: String,
-        blob_id: String,
+        file: String,
         tag: String,
         error: Option<String>,
         graph: Vec<u8>,
     ) -> Self {
         Self {
-            repository_id,
-            blob_id,
+            file,
             tag,
             error,
             graph,
@@ -50,20 +47,18 @@ impl TryFrom<Tuple> for StackGraphInfo {
     type Error = StackGraphStorageError;
 
     fn try_from(tuple: Tuple) -> Result<Self, Self::Error> {
-        if tuple.len() != 5 {
+        if tuple.len() != 4 {
             return Err(InvalidTuple);
         }
 
-        let repository_id = tuple[0].get_str();
-        let blob_id = tuple[1].get_str();
-        let tag = tuple[2].get_str();
-        let error = tuple[3].get_str();
-        let graph = tuple[4].get_bytes();
+        let file = tuple[0].get_str();
+        let tag = tuple[1].get_str();
+        let error = tuple[2].get_str();
+        let graph = tuple[3].get_bytes();
 
         // TODO: replace unwrap and handle error
         Ok(Self {
-            repository_id: String::from(repository_id.unwrap()),
-            blob_id: String::from(blob_id.unwrap()),
+            file: String::from(file.unwrap()),
             tag: String::from(tag.unwrap()),
             error: error.map(String::from),
             graph: Vec::from(graph.unwrap()),
