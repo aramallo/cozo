@@ -13,18 +13,20 @@ use stack_graphs::{
 use super::{
     augoor_urn::AugoorUrn,
     blobs::{GraphBlob, NodePathBlob, RootPathBlob},
-    stack_graph_storage_error::{Result, StackGraphStorageError as Error},
+    error::{Error, Result},
 };
 
 type Blob = Box<[u8]>;
 
 /// State for a definition query. Fixed rules cannot themselves load data, so
-/// all data they might need must be provid. The `*_blobs` fields hold binary
-/// blobs representing partial graphs or paths that have not yet been “loaded”;
-/// whenever one is needed it is taken out of the corresponding collection,
-/// parsed, and integrated into `graph`, `partials`, and/or `db`. When a key
-/// for one of the `*_blobs` collections exists but its value is empty, that
-/// means the data has already been loaded.
+/// all data they might need must be provided. The `*_blobs` fields initially
+/// hold binary blobs representing partial graphs or paths that have not yet
+/// been “loaded” (i.e. [`Unloaded`][`LoadState::Loaded`]). Whenever a blob
+/// is needed it is “loaded”, i.e. it is taken out of the [`LoadState`],
+/// parsed, and inserted into `graph`, `partials`, and/or `db`. When a key
+/// for one of the `*_blobs` collections exists but its value is
+/// [`Loaded`][`LoadState::Loaded`], that simply means the data has already
+/// been loaded; if the key does not exist, that’s an error.
 pub(super) struct State {
     /// Indexed by Git `BLOB_OID`
     graph_blobs: HashMap<Handle<File>, LoadState<Blob>>,

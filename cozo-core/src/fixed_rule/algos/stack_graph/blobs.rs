@@ -1,6 +1,6 @@
 use crate::data::tuple::Tuple;
 
-use super::stack_graph_storage_error::StackGraphStorageError;
+use super::error::Error;
 
 pub struct GraphBlob {
     /// BLOB_OID, or maybe full file path if needed
@@ -23,7 +23,7 @@ pub struct RootPathBlob {
 }
 
 impl TryFrom<Tuple> for GraphBlob {
-    type Error = StackGraphStorageError;
+    type Error = Error;
     fn try_from(tuple: Tuple) -> Result<Self, Self::Error> {
         if tuple.len() != 2 {
             return Err(Self::Error::InvalidTuple);
@@ -41,7 +41,7 @@ impl TryFrom<Tuple> for GraphBlob {
 }
 
 impl TryFrom<Tuple> for NodePathBlob {
-    type Error = StackGraphStorageError;
+    type Error = Error;
     fn try_from(tuple: Tuple) -> Result<Self, Self::Error> {
         if tuple.len() != 3 {
             return Err(Self::Error::InvalidTuple);
@@ -65,7 +65,7 @@ impl TryFrom<Tuple> for NodePathBlob {
 }
 
 impl TryFrom<Tuple> for RootPathBlob {
-    type Error = StackGraphStorageError;
+    type Error = Error;
     fn try_from(tuple: Tuple) -> Result<Self, Self::Error> {
         if tuple.len() != 3 {
             return Err(Self::Error::InvalidTuple);

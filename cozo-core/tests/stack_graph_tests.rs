@@ -58,7 +58,7 @@ fn test_stack_graphs() {
 
     ?[urn] <~ StackGraph(*sg_graph[], sg_starting[], reference_urn: 'urn:augr:file_id:4031:4048')
     "#;
-    let query_result = db.run_default(&query);
+    let query_result = db.run_default(query);
     match query_result {
         Err(err) => panic!("Error {}", err),
         Ok(result) => {

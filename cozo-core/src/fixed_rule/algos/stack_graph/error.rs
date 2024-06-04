@@ -1,9 +1,10 @@
-use thiserror::Error;
 use bincode::error::{DecodeError, EncodeError};
 use miette::Diagnostic;
+use thiserror::Error;
 
 #[derive(Debug, Error, Diagnostic)]
-pub enum StackGraphStorageError {
+#[non_exhaustive]
+pub enum Error {
     #[error("cancelled at {0}")]
     Cancelled(&'static str),
     #[error("unsupported database version {0}")]
@@ -21,12 +22,12 @@ pub enum StackGraphStorageError {
     #[error("missing data: {0}")]
     MissingData(String),
     #[error("misc: {0}")] // TODO: Rewrite to proper variants
-    Misc(String)
+    Misc(String),
 }
 
-pub type Result<T, E = StackGraphStorageError> = std::result::Result<T, E>;
+pub type Result<T, E = Error> = std::result::Result<T, E>;
 
-impl From<stack_graphs::CancellationError> for StackGraphStorageError {
+impl From<stack_graphs::CancellationError> for Error {
     fn from(err: stack_graphs::CancellationError) -> Self {
         Self::Cancelled(err.0)
     }

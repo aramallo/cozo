@@ -9,11 +9,11 @@ use crate::{
 
 mod augoor_urn;
 mod blobs;
-mod stack_graph_storage_error;
+mod error;
 mod state;
 
 use augoor_urn::AugoorUrn;
-use stack_graph_storage_error::StackGraphStorageError as Error;
+use error::Error;
 
 pub(crate) struct StackGraphQuery;
 
