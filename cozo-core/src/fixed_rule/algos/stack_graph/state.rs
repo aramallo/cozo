@@ -4,7 +4,7 @@ use stack_graphs::{
     arena::Handle,
     graph::{Degree, File, Node, NodeID, StackGraph},
     partial::{PartialPath, PartialPaths, PartialSymbolStack},
-    stitching::{Database, ForwardCandidates, Stats},
+    stitching::{Database, ForwardCandidates},
     CancellationFlag,
 };
 
@@ -26,6 +26,16 @@ struct State {
     partials: PartialPaths,
     db: Database,
     stats: Stats,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct Stats {
+    pub file_loads: usize,
+    pub file_cached: usize,
+    pub root_path_loads: usize,
+    pub root_path_cached: usize,
+    pub node_path_loads: usize,
+    pub node_path_cached: usize,
 }
 
 impl ForwardCandidates<Handle<PartialPath>, PartialPath, Database, StackGraphStorageError>
