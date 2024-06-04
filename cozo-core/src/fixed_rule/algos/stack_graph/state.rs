@@ -13,9 +13,10 @@ use super::stack_graph_storage_error::{Result, StackGraphStorageError};
 /// State for a definition query. Fixed rules cannot themselves load data, so
 /// all data they might need must be provid. The `*_blobs` fields hold binary
 /// blobs representing partial graphs or paths that have not yet been “loaded”;
-/// whenever one is needed it is removed from the corresponding collection,
-/// parsed, and integrated into `graph`, `partials`, and/or `db`. When the
-/// value for the `*_blob` is empty it means the data has already been loaded.
+/// whenever one is needed it is taken out of the corresponding collection,
+/// parsed, and integrated into `graph`, `partials`, and/or `db`. When a key
+/// for one of the `*_blobs` collections exists but its value is empty, that
+/// means the data has already been loaded.
 struct State {
     /// Indexed by Git `BLOB_OID`
     graph_blobs: HashMap<Handle<File>, Option<Box<[u8]>>>,
