@@ -1,4 +1,5 @@
 use std::{
+    borrow::Cow,
     collections::{hash_map::Entry as HashEntry, HashMap},
     ops::Range as StdRange,
 };
@@ -19,6 +20,7 @@ use super::{
     error::{Error, Result},
 };
 
+/// Optionally Zstd-compressed (see [`decompress_if_needed`]).
 type Blob = Box<[u8]>;
 
 type FileID = Box<str>;
@@ -209,6 +211,8 @@ impl State {
             return Ok(());
         };
 
+        let blob = decompress_if_needed(&blob);
+
         // copious_debugging!(" * Load from database");
         stats.file_loads += 1;
         let (file_graph, _): (sg_serde::StackGraph, _) =
@@ -252,6 +256,7 @@ impl State {
 
         for blob in blobs {
             cancellation_flag.check("loading file paths")?;
+            let blob = decompress_if_needed(&blob);
             let (path, _): (sg_serde::PartialPath, _) =
                 bincode::decode_from_slice(&blob, BINCODE_CONFIG)?;
             let path = path.to_partial_path(&mut self.graph, &mut self.partials)?;
@@ -313,6 +318,7 @@ impl State {
                     &mut self.graph_blobs,
                     &mut self.stats,
                 )?;
+                let blob = decompress_if_needed(&blob);
                 let (path, _): (sg_serde::PartialPath, _) =
                     bincode::decode_from_slice(&blob, BINCODE_CONFIG)?;
                 let path = path.to_partial_path(&mut self.graph, &mut self.partials)?;
@@ -423,5 +429,21 @@ pub fn node_byte_range(
         None
     } else {
         Some(start..end)
+    }
+}
+
+fn decompress_if_needed(bytes: &[u8]) -> Cow<'_, [u8]> {
+    // Check Zstd’s magic number
+    if bytes.len() < 4 || bytes[..4] != [0x28, 0xb5, 0x2f, 0xfd] {
+        return bytes.into()
+    }
+
+    // TODO: What is a reasonable `capacity`? Or just `usize::MAX`?
+    if let Ok(decompressed_bytes) = zstd::bulk::decompress(bytes, u16::MAX as _) {
+        decompressed_bytes.into()
+    } else {
+        // Could not decompress, so just return the original bytes and let
+        // decoding fail downstream
+        bytes.into()
     }
 }

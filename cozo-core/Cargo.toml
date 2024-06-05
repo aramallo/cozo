@@ -142,8 +142,9 @@ swapvec = "0.3.0"
 
 # Augoor related
 bincode = "2.0.0-rc.3"
-tree-sitter = "0.22.6"
+lsp-positions = "0.3.3"
 stack-graphs = { version = "0.13.0",features = ["bincode", "serde"] }
+tree-sitter = "0.22.6"
 tree-sitter-graph = { version = "0.11.2" }
 tree-sitter-stack-graphs = { version = "0.8.1" }
-lsp-positions = "0.3.3"
+zstd = "0.13.1"
