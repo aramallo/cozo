@@ -11,6 +11,17 @@ fn apply_db_schema(db: &mut DbInstance) {
         .expect("Could not create relations");
 }
 
+macro_rules! load_test_row {
+    ($path:expr) => {
+        vec![
+            DataValue::from(include_str!(concat!($path, ".blob_oid.txt"))),
+            DataValue::from("tag_value"),
+            DataValue::Null,
+            DataValue::from(include_bytes!(concat!($path, ".stack_graph.bin")).to_vec()),
+        ]
+    };
+}
+
 fn populate_graphs_relation(db: &mut DbInstance) {
     // Imports the rows into the stored relation
     // NOTE: Doing this via a CozoScript query takes considerably more.
@@ -23,12 +34,11 @@ fn populate_graphs_relation(db: &mut DbInstance) {
                 "error".to_string(),
                 "value".to_string(),
             ],
-            rows: vec![vec![
-                DataValue::from("d51340e6364531f6c2ab3325fb31157932afc17d"),
-                DataValue::from("tag_value"),
-                DataValue::Null,
-                DataValue::from(include_bytes!("stack_graphs/graph.bin").to_vec()),
-            ]],
+            rows: vec![
+                load_test_row!("stack_graphs/python_project/main.py"),
+                load_test_row!("stack_graphs/python_project/a.py"),
+                load_test_row!("stack_graphs/python_project/b.py"),
+            ],
             next: None,
         },
     )]))
@@ -36,7 +46,7 @@ fn populate_graphs_relation(db: &mut DbInstance) {
 }
 
 #[test]
-fn test_stack_graphs() {
+fn it_finds_definition() {
     // Initializes database
     let mut db = DbInstance::default();
     apply_db_schema(&mut db);
