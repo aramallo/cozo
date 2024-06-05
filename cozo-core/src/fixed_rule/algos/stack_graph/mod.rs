@@ -58,7 +58,6 @@ impl FixedRule for StackGraphQuery {
 
         let reference_urn_string = payload.string_option("reference_urn", None)?;
         let reference_urn = reference_urn_string
-            .as_str()
             .parse::<AugoorUrn>()
             .expect("Invalid URN");
 

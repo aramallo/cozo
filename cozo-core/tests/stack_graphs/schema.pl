@@ -1,13 +1,13 @@
-{:create sg_graph {
+{:create sg_graphs {
     file: String =>
     tag: String,
     error: String?,
-    graph: Bytes
+    value: Bytes
 }}
 
-{:create sg_file_paths {
+{:create sg_node_paths {
     file: String =>
-    local_id: Int,
+    start_local_id: Int,
     value: Bytes
 }}
 

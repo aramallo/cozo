@@ -1,9 +1,12 @@
-use std::{collections::HashMap, ops::Range as StdRange};
+use std::{
+    collections::{hash_map::Entry as HashEntry, HashMap},
+    ops::Range as StdRange,
+};
 
 use itertools::Itertools as _;
 use stack_graphs::{
     arena::Handle,
-    graph::{Degree, File, Node, NodeID, StackGraph},
+    graph::{Degree, Node, StackGraph},
     partial::{PartialPath, PartialPaths, PartialSymbolStack},
     serde as sg_serde,
     stitching::{Database, ForwardCandidates},
@@ -18,6 +21,9 @@ use super::{
 
 type Blob = Box<[u8]>;
 
+type FileID = Box<str>;
+type NodeID = (FileID, u32);
+
 /// State for a definition query. Fixed rules cannot themselves load data, so
 /// all data they might need must be provided. The `*_blobs` fields initially
 /// hold binary blobs representing partial graphs or paths that have not yet
@@ -29,11 +35,11 @@ type Blob = Box<[u8]>;
 /// been loaded; if the key does not exist, that’s an error.
 pub(super) struct State {
     /// Indexed by Git `BLOB_OID`
-    graph_blobs: HashMap<Handle<File>, LoadState<Blob>>,
+    graph_blobs: HashMap<FileID, LoadState<Blob>>,
     /// Indexed by Git `BLOB_OID` & local ID
     node_path_blobs: HashMap<NodeID, LoadState<Vec<Blob>>>,
     /// Indexed by serialized symbol stacks
-    root_path_blobs: HashMap<Box<str>, LoadState<Vec<(Handle<File>, Blob)>>>,
+    root_path_blobs: HashMap<Box<str>, LoadState<Vec<(FileID, Blob)>>>,
     pub(super) graph: StackGraph,
     partials: PartialPaths,
     db: Database,
@@ -60,33 +66,31 @@ impl State {
         node_path_blobs: impl Iterator<Item = Result<NodePathBlob>>,
         root_path_blobs: impl Iterator<Item = Result<RootPathBlob>>,
     ) -> Result<Self> {
-        let mut graph = StackGraph::new();
+        let graph = StackGraph::new();
 
-        let graph_blobs = graph_blobs
-            .map(|graph_blob| {
-                let graph_blob = graph_blob?;
-                let file = graph
-                    .add_file(&graph_blob.file_id)
-                    .map_err(|_existing_file| {
-                        Error::Misc(format!(
-                            "file with ID {:?} already exists",
-                            graph_blob.file_id
-                        ))
-                    })?;
-                Result::Ok((file, LoadState::Unloaded(graph_blob.blob)))
-            })
-            .collect::<Result<_, Error>>()?;
+        let mut indexed_graph_blobs = HashMap::new();
+        for graph_blob in graph_blobs {
+            let graph_blob = graph_blob?;
+            let HashEntry::Vacant(entry) = indexed_graph_blobs.entry(graph_blob.file_id.clone())
+            else {
+                return Err(Error::Misc(format!(
+                    "file with ID {:?} already exists",
+                    graph_blob.file_id
+                )));
+            };
+            entry.insert(LoadState::Unloaded(graph_blob.blob));
+        }
 
         let mut indexed_node_path_blobs = HashMap::new();
         for node_path_blob in node_path_blobs {
             let node_path_blob = node_path_blob?;
-            let file = graph.get_file(&node_path_blob.file_id).ok_or_else(|| {
-                Error::Misc(format!(
+            if !indexed_graph_blobs.contains_key(node_path_blob.file_id.as_ref()) {
+                return Err(Error::Misc(format!(
                     "no known file with ID {:?}",
                     node_path_blob.file_id
-                ))
-            })?;
-            let node_id = NodeID::new_in_file(file, node_path_blob.start_node_local_id);
+                )));
+            }
+            let node_id = (node_path_blob.file_id, node_path_blob.start_node_local_id);
             let LoadState::Unloaded(blobs) = indexed_node_path_blobs
                 .entry(node_id)
                 .or_insert_with(|| LoadState::Unloaded(Vec::new()))
@@ -99,23 +103,23 @@ impl State {
         let mut indexed_root_path_blobs = HashMap::new();
         for root_path_blob in root_path_blobs {
             let root_path_blob = root_path_blob?;
-            let file = graph.get_file(&root_path_blob.file_id).ok_or_else(|| {
-                Error::Misc(format!(
+            if !indexed_graph_blobs.contains_key(root_path_blob.file_id.as_ref()) {
+                return Err(Error::Misc(format!(
                     "no known file with ID {:?}",
                     root_path_blob.file_id
-                ))
-            })?;
+                )));
+            };
             let LoadState::Unloaded(files_blobs) = indexed_root_path_blobs
                 .entry(root_path_blob.precondition_symbol_stack)
                 .or_insert_with(|| LoadState::Unloaded(Vec::new()))
             else {
                 unreachable!()
             };
-            files_blobs.push((file, root_path_blob.blob));
+            files_blobs.push((root_path_blob.file_id, root_path_blob.blob));
         }
 
         Ok(Self {
-            graph_blobs,
+            graph_blobs: indexed_graph_blobs,
             node_path_blobs: indexed_node_path_blobs,
             root_path_blobs: indexed_root_path_blobs,
             graph,
@@ -126,14 +130,15 @@ impl State {
     }
 
     pub(super) fn get_node(&mut self, urn: &AugoorUrn) -> Option<Handle<Node>> {
-        let file = self.graph.get_file(&urn.file_id)?;
         Self::load_graph_for_file_inner(
-            file,
+            &urn.file_id,
             &mut self.graph,
             &mut self.graph_blobs,
             &mut self.stats,
         )
-        .ok();
+        .inspect_err(|e| eprintln!("{e:#}"))
+        .ok()?;
+        let file = self.graph.get_file(&urn.file_id)?;
         self.graph
             .nodes_for_file(file)
             .find(|&node| node_byte_range(&self.graph, node).is_some_and(|r| r == urn.byte_range))
@@ -179,20 +184,22 @@ impl ForwardCandidates<Handle<PartialPath>, PartialPath, Database, Error> for St
 pub static BINCODE_CONFIG: bincode::config::Configuration = bincode::config::standard();
 
 impl State {
-    fn load_graph_for_file_inner(
-        file: Handle<File>,
+    fn load_graph_for_file_inner<S: AsRef<str> + ?Sized>(
+        file_id: &S,
         graph: &mut StackGraph,
-        graph_blobs: &mut HashMap<Handle<File>, LoadState<Blob>>,
+        graph_blobs: &mut HashMap<FileID, LoadState<Blob>>,
         stats: &mut Stats,
     ) -> Result<()> {
+        let file_id: &str = file_id.as_ref();
+
         // copious_debugging!("--> Load graph for {}", file);
 
-        let Some(blob) = graph_blobs.get_mut(&file) else {
+        let Some(blob) = graph_blobs.get_mut(file_id) else {
             // copious_debugging!("   > Already loaded");
-            eprintln!("No graph for key {file:?}");
+            eprintln!("No graph for key {file_id:?}");
             return Err(Error::MissingData(format!(
                 "graph for file key {:?}",
-                graph[file].name(),
+                file_id,
             )));
         };
 
@@ -220,9 +227,14 @@ impl State {
 
         // copious_debugging!(" * Load extensions from node {}", node.display(&self.graph));
         let id = self.graph[node].id();
-        let Some(file) = id.file() else { return Ok(()) };
+        let Some(file_id) = id.file().map(|f| self.graph[f].name()) else {
+            return Ok(());
+        };
 
-        let Some(blobs_load_state) = self.node_path_blobs.get_mut(&id) else {
+        let Some(blobs_load_state) = self
+            .node_path_blobs
+            .get_mut(&(Box::from(file_id), id.local_id()))
+        else {
             eprintln!("No file paths for key {id:?}");
             return Err(Error::MissingData(format!("file paths for key {id:?}")));
         };
@@ -240,12 +252,6 @@ impl State {
 
         for blob in blobs {
             cancellation_flag.check("loading file paths")?;
-            Self::load_graph_for_file_inner(
-                file,
-                &mut self.graph,
-                &mut self.graph_blobs,
-                &mut self.stats,
-            )?;
             let (path, _): (sg_serde::PartialPath, _) =
                 bincode::decode_from_slice(&blob, BINCODE_CONFIG)?;
             let path = path.to_partial_path(&mut self.graph, &mut self.partials)?;
@@ -302,7 +308,7 @@ impl State {
             for (file, blob) in blobs {
                 cancellation_flag.check("loading root paths")?;
                 Self::load_graph_for_file_inner(
-                    file,
+                    &file,
                     &mut self.graph,
                     &mut self.graph_blobs,
                     &mut self.stats,
@@ -353,6 +359,7 @@ struct PartialSymbolStackExt(PartialSymbolStack);
 // where has-var is "V" if the symbol stack has a variable, "X" otherwise.
 impl PartialSymbolStackExt {
     /// Returns a string representation of this symbol stack for indexing in the database.
+    #[allow(dead_code)]
     fn storage_key(self, graph: &StackGraph, partials: &mut PartialPaths) -> String {
         let mut key = String::new();
         match self.0.has_variable() {
