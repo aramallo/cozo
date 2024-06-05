@@ -99,12 +99,30 @@ fn it_finds_definition_in_single_file() {
         )],
     );
 
+    import_node_paths_data(
+        &mut db,
+        vec![
+            include_node_path_row!("stack_graphs/single_file_python/simple.py", 0),
+            include_node_path_row!("stack_graphs/single_file_python/simple.py", 7),
+        ],
+    );
+
+    import_root_paths_data(
+        &mut db,
+        vec![include_root_path_row!(
+            "stack_graphs/single_file_python/simple.py",
+            "V␞__main__"
+        )],
+    );
+
     // Perform a stack graph query
     let query = r#"
     graphs[file, value] :=
         *sg_graphs[file, value]
-    node_paths[file, start_local_id, value] <- []
-    root_paths[file, symbol_stack, value] <- []
+    node_paths[file, start_local_id, value] :=
+        *sg_node_paths[file, start_local_id, value]
+    root_paths[file, symbol_stack, value] :=
+        *sg_root_paths[file, symbol_stack, value]
 
     ?[urn] <~ StackGraph(graphs[], node_paths[], root_paths[], reference_urn: 'urn:augr:c329c84559b085714c39b872fe5e8df0a39f0a64:13:14')
     "#;
