@@ -61,13 +61,8 @@ impl FixedRule for StackGraphQuery {
             .parse::<AugoorUrn>()
             .expect("Invalid URN");
 
-        // Some placeholder code that demonstrates using a stack graph
-        // This exists only temporarily to demonstrate that:
-        // - stack graphs can be deserialized
-        // - the deserialized stack graph works
-        // - it is possible to use an Augoor KG URN as a starting point for a query
-        if state.get_node(&reference_urn).is_some() {
-            out.put(vec![DataValue::from(reference_urn.to_string())])
+        if let Some(definition_urn) = state.get_definition_urn(&reference_urn) {
+            out.put(vec![DataValue::from(definition_urn.to_string())])
         }
 
         Ok(())

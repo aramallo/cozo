@@ -131,6 +131,11 @@ impl State {
         })
     }
 
+    pub(super) fn get_definition_urn(&mut self, reference_urn: &AugoorUrn) -> Option<AugoorUrn> {
+        self.get_node(reference_urn)
+            .and_then(|node| urn_from_node(&self.graph, node))
+    }
+
     pub(super) fn get_node(&mut self, urn: &AugoorUrn) -> Option<Handle<Node>> {
         Self::load_graph_for_file_inner(
             &urn.file_id,
@@ -145,6 +150,28 @@ impl State {
             .nodes_for_file(file)
             .find(|&node| node_byte_range(&self.graph, node).is_some_and(|r| r == urn.byte_range))
     }
+}
+
+fn urn_from_node(stack_graph: &StackGraph, node: Handle<Node>) -> Option<AugoorUrn> {
+    use std::ops::Range;
+
+    fn byte_range(stack_graph: &StackGraph, node: Handle<Node>) -> Option<Range<u32>> {
+        fn lsp_span_to_byte_range(span: &lsp_positions::Span) -> Range<u32> {
+            fn lsp_pos_to_byte_offset(pos: &lsp_positions::Position) -> u32 {
+                (pos.containing_line.start + pos.column.utf8_offset) as u32
+            }
+            lsp_pos_to_byte_offset(&span.start)..lsp_pos_to_byte_offset(&span.end)
+        }
+        stack_graph
+            .source_info(node)
+            .map(|source_info| lsp_span_to_byte_range(&source_info.span))
+    }
+
+    let file = stack_graph[node].file()?;
+    let name = stack_graph[file].name();
+    let byte_range = byte_range(stack_graph, node)?;
+    let urn = AugoorUrn::new(name.to_string(), byte_range);
+    Some(urn)
 }
 
 #[derive(Clone, Debug, Default)]
@@ -435,7 +462,7 @@ pub fn node_byte_range(
 fn decompress_if_needed(bytes: &[u8]) -> Cow<'_, [u8]> {
     // Check Zstd’s magic number
     if bytes.len() < 4 || bytes[..4] != [0x28, 0xb5, 0x2f, 0xfd] {
-        return bytes.into()
+        return bytes.into();
     }
 
     // TODO: What is a reasonable `capacity`? Or just `usize::MAX`?
