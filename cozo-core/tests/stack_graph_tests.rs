@@ -55,13 +55,10 @@ fn it_finds_definition() {
     // Perform a stack graph query
     let query = r#"
     graphs[file, value] :=
-        file = 'd51340e6364531f6c2ab3325fb31157932afc17d',
         *sg_graphs[file, tag, error, value]
     node_paths[file, start_local_id, value] :=
-        file = 'd51340e6364531f6c2ab3325fb31157932afc17d',
         *sg_node_paths[file, start_local_id, value]
     root_paths[file, symbol_stack, value] :=
-        file = 'd51340e6364531f6c2ab3325fb31157932afc17d',
         *sg_root_paths[file, symbol_stack, value]
 
     ?[urn] <~ StackGraph(graphs[], node_paths[], root_pathsp[], reference_urn: 'urn:augr:d51340e6364531f6c2ab3325fb31157932afc17d:22:25')
