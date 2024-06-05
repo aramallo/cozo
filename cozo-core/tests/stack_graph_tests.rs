@@ -102,11 +102,11 @@ fn it_finds_definition_in_single_file() {
     // Perform a stack graph query
     let query = r#"
     graphs[file, value] :=
-        *sg_graphs[file, tag, error, value]
-    node_paths[file, start_local_id, value] := []
-    root_paths[file, symbol_stack, value] := []
+        *sg_graphs[file, value]
+    node_paths[file, start_local_id, value] <- []
+    root_paths[file, symbol_stack, value] <- []
 
-    ?[urn] <~ StackGraph(graphs[], node_paths[], root_pathsp[], reference_urn: 'urn:augr:c329c84559b085714c39b872fe5e8df0a39f0a64:13:14')
+    ?[urn] <~ StackGraph(graphs[], node_paths[], root_paths[], reference_urn: 'urn:augr:c329c84559b085714c39b872fe5e8df0a39f0a64:13:14')
     "#;
     let query_result = db.run_default(query).unwrap();
 
