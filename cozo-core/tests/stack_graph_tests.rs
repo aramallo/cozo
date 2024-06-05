@@ -1,6 +1,7 @@
 #![cfg(feature = "graph-algo")]
 
 use cozo::{DataValue, DbInstance, NamedRows, ScriptMutability};
+use pretty_assertions::assert_eq;
 use std::collections::BTreeMap;
 
 fn apply_db_schema(db: &mut DbInstance) {
