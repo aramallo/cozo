@@ -7,7 +7,7 @@ use std::{
 use itertools::Itertools as _;
 use stack_graphs::{
     arena::Handle,
-    graph::{Degree, Node, StackGraph},
+    graph::{Degree, File, Node, StackGraph},
     partial::{PartialPath, PartialPaths, PartialSymbolStack},
     serde as sg_serde,
     stitching::{Database, ForwardCandidates},
@@ -131,47 +131,18 @@ impl State {
         })
     }
 
-    pub(super) fn get_definition_urn(&mut self, reference_urn: &AugoorUrn) -> Option<AugoorUrn> {
-        self.get_node(reference_urn)
-            .and_then(|node| urn_from_node(&self.graph, node))
-    }
-
-    pub(super) fn get_node(&mut self, urn: &AugoorUrn) -> Option<Handle<Node>> {
-        Self::load_graph_for_file_inner(
+    pub(super) fn load_node(&mut self, urn: &AugoorUrn) -> Result<Option<Handle<Node>>> {
+        let file = Self::load_graph_for_file_inner(
             &urn.file_id,
             &mut self.graph,
             &mut self.graph_blobs,
             &mut self.stats,
-        )
-        .inspect_err(|e| eprintln!("{e:#}"))
-        .ok()?;
-        let file = self.graph.get_file(&urn.file_id)?;
-        self.graph
+        )?;
+        Ok(self
+            .graph
             .nodes_for_file(file)
-            .find(|&node| node_byte_range(&self.graph, node).is_some_and(|r| r == urn.byte_range))
+            .find(|&node| node_byte_range(&self.graph, node).is_some_and(|r| r == urn.byte_range)))
     }
-}
-
-fn urn_from_node(stack_graph: &StackGraph, node: Handle<Node>) -> Option<AugoorUrn> {
-    use std::ops::Range;
-
-    fn byte_range(stack_graph: &StackGraph, node: Handle<Node>) -> Option<Range<u32>> {
-        fn lsp_span_to_byte_range(span: &lsp_positions::Span) -> Range<u32> {
-            fn lsp_pos_to_byte_offset(pos: &lsp_positions::Position) -> u32 {
-                (pos.containing_line.start + pos.column.utf8_offset) as u32
-            }
-            lsp_pos_to_byte_offset(&span.start)..lsp_pos_to_byte_offset(&span.end)
-        }
-        stack_graph
-            .source_info(node)
-            .map(|source_info| lsp_span_to_byte_range(&source_info.span))
-    }
-
-    let file = stack_graph[node].file()?;
-    let name = stack_graph[file].name();
-    let byte_range = byte_range(stack_graph, node)?;
-    let urn = AugoorUrn::new(name.to_string(), byte_range);
-    Some(urn)
 }
 
 #[derive(Clone, Debug, Default)]
@@ -213,12 +184,21 @@ impl ForwardCandidates<Handle<PartialPath>, PartialPath, Database, Error> for St
 pub static BINCODE_CONFIG: bincode::config::Configuration = bincode::config::standard();
 
 impl State {
+    pub(super) fn load_graph_for_file(&mut self, file_id: &str) -> Result<Handle<File>> {
+        Self::load_graph_for_file_inner(
+            file_id,
+            &mut self.graph,
+            &mut self.graph_blobs,
+            &mut self.stats,
+        )
+    }
+
     fn load_graph_for_file_inner<S: AsRef<str> + ?Sized>(
         file_id: &S,
         graph: &mut StackGraph,
         graph_blobs: &mut HashMap<FileID, LoadState<Blob>>,
         stats: &mut Stats,
-    ) -> Result<()> {
+    ) -> Result<Handle<File>> {
         let file_id: &str = file_id.as_ref();
 
         // copious_debugging!("--> Load graph for {}", file);
@@ -232,10 +212,16 @@ impl State {
             )));
         };
 
+        fn file_handle(graph: &StackGraph, file_id: &str) -> Result<Handle<File>> {
+            Ok(graph.get_file(file_id).ok_or_else(|| {
+                Error::Misc(format!("expected to have loaded file with ID {file_id:?}"))
+            })?)
+        }
+
         let Some(blob) = blob.load() else {
             // copious_debugging!(" * Already loaded");
             stats.file_cached += 1;
-            return Ok(());
+            return file_handle(graph, file_id);
         };
 
         let blob = decompress_if_needed(&blob);
@@ -245,7 +231,7 @@ impl State {
         let (file_graph, _): (sg_serde::StackGraph, _) =
             bincode::decode_from_slice(&blob, BINCODE_CONFIG)?;
         file_graph.load_into(graph)?;
-        Ok(())
+        file_handle(graph, file_id)
     }
 
     fn load_paths_for_node(
@@ -262,16 +248,14 @@ impl State {
             return Ok(());
         };
 
-        let Some(blobs_load_state) = self
-            .node_path_blobs
-            .get_mut(&(Box::from(file_id), id.local_id()))
-        else {
-            eprintln!("No file paths for key {id:?}");
-            return Err(Error::MissingData(format!("file paths for key {id:?}")));
+        let blob_key = (Box::from(file_id), id.local_id());
+        let Some(blobs_load_state) = self.node_path_blobs.get_mut(&blob_key) else {
+            // Not all nodes will have paths starting from them
+            return Ok(());
         };
 
         let Some(blobs) = blobs_load_state.load() else {
-            eprintln!("No file paths for key {:?}", id);
+            eprintln!("No file paths for key {blob_key:?}");
             self.stats.node_path_cached += 1;
             return Ok(());
         };
@@ -319,12 +303,8 @@ impl State {
             let Some(blobs_load_state) =
                 self.root_path_blobs.get_mut(symbol_stack.as_ref() as &str)
             else {
-                // copious_debugging!("   > Already loaded");
-                eprintln!("No root paths for key {:?}", symbol_stack);
-                return Err(Error::MissingData(format!(
-                    "root paths for symbol stack key {:?}",
-                    symbol_stack
-                )));
+                // Not all symbol stack patterns will have results
+                continue;
             };
 
             let Some(blobs) = blobs_load_state.load() else {
@@ -438,7 +418,7 @@ impl PartialSymbolStackExt {
     }
 }
 
-pub fn node_byte_range(
+pub(super) fn node_byte_range(
     stack_graph: &StackGraph,
     stack_graph_node: Handle<Node>,
 ) -> Option<StdRange<u32>> {

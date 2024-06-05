@@ -167,7 +167,7 @@ fn it_finds_definition_across_multiple_files() {
     let query_result = db.run_default(query).unwrap();
 
     let expected = vec![vec![DataValue::from(
-        "urn:augr:d51340e6364531f6c2ab3325fb31157932afc17d:22:25",
+        "urn:augr:81ec7e8b7425cdc58b42995c832b7abf727ef570:0:3",
     )]];
     assert_eq!(expected, query_result.rows);
 }

@@ -10,10 +10,12 @@ use crate::{
 mod augoor_urn;
 mod blobs;
 mod error;
+mod query;
 mod state;
 
 use augoor_urn::AugoorUrn;
 use error::Error;
+use query::Querier;
 
 pub(crate) struct StackGraphQuery;
 
@@ -34,7 +36,7 @@ impl FixedRule for StackGraphQuery {
         &self,
         payload: FixedRulePayload<'_, '_>,
         out: &mut RegularTempStore,
-        _poison: Poison,
+        poison: Poison,
     ) -> Result<()> {
         use Error as E;
 
@@ -56,13 +58,14 @@ impl FixedRule for StackGraphQuery {
 
         let mut state = state::State::new(graph_blobs, node_path_blobs, root_path_blobs)?;
 
-        let reference_urn_string = payload.string_option("reference_urn", None)?;
-        let reference_urn = reference_urn_string
+        let ref_urn = payload.string_option("reference_urn", None)?;
+        let ref_urn = ref_urn
             .parse::<AugoorUrn>()
             .expect("Invalid URN");
 
-        if let Some(definition_urn) = state.get_definition_urn(&reference_urn) {
-            out.put(vec![DataValue::from(definition_urn.to_string())])
+        let mut querier = Querier::new(&mut state);
+        for def_urn in querier.definitions(&ref_urn, &PoisonCancellation(poison))? {
+            out.put(vec![DataValue::from(def_urn.to_string())])
         }
 
         Ok(())
