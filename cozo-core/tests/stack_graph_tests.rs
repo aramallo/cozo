@@ -46,6 +46,43 @@ fn populate_graphs_relation(db: &mut DbInstance) {
 }
 
 #[test]
+fn it_finds_definition_in_single_file() {
+    // Initializes database
+    let mut db = DbInstance::default();
+    apply_db_schema(&mut db);
+    db.import_relations(BTreeMap::from([(
+        "sg_graphs".to_string(),
+        NamedRows {
+            headers: vec![
+                "file".to_string(),
+                "tag".to_string(),
+                "error".to_string(),
+                "value".to_string(),
+            ],
+            rows: vec![load_test_row!("stack_graphs/single_file_python/simple.py")],
+            next: None,
+        },
+    )]))
+    .unwrap();
+
+    // Perform a stack graph query
+    let query = r#"
+    graphs[file, value] :=
+        *sg_graphs[file, tag, error, value]
+    node_paths[file, start_local_id, value] := []
+    root_paths[file, symbol_stack, value] := []
+
+    ?[urn] <~ StackGraph(graphs[], node_paths[], root_pathsp[], reference_urn: 'urn:augr:c329c84559b085714c39b872fe5e8df0a39f0a64:13:14')
+    "#;
+    let query_result = db.run_default(query).unwrap();
+
+    let expected = vec![vec![DataValue::from(
+        "urn:augr:c329c84559b085714c39b872fe5e8df0a39f0a64:0:1",
+    )]];
+    assert_eq!(expected, query_result.rows);
+}
+
+#[test]
 fn it_finds_definition() {
     // Initializes database
     let mut db = DbInstance::default();
