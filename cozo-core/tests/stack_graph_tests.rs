@@ -55,13 +55,10 @@ fn test_stack_graphs() {
 
     ?[urn] <~ StackGraph(graphs[], node_paths[], root_pathsp[], reference_urn: 'urn:augr:d51340e6364531f6c2ab3325fb31157932afc17d:22:25')
     "#;
-    let query_result = db.run_default(query);
-    match query_result {
-        Err(err) => panic!("Error {}", err),
-        Ok(result) if !result.rows.is_empty() => {
-            println!("{:?}", result.rows);
-            assert_eq!(result.rows[0][0], DataValue::from("urn:augr:d51340e6364531f6c2ab3325fb31157932afc17d:22:25"));
-        }
-        _ => panic!("Empty result")
-    }
+    let query_result = db.run_default(query).unwrap();
+
+    let expected = vec![vec![DataValue::from(
+        "urn:augr:d51340e6364531f6c2ab3325fb31157932afc17d:22:25",
+    )]];
+    assert_eq!(expected, query_result.rows);
 }
