@@ -5,7 +5,6 @@ use pretty_assertions::assert_eq;
 use std::collections::BTreeMap;
 
 fn apply_db_schema(db: &mut DbInstance) {
-    // Creates stored relations
     let schema = include_str!("stack_graphs/schema.pl");
     db.run_script(schema, Default::default(), ScriptMutability::Mutable)
         .expect("Could not create relations");
@@ -42,23 +41,19 @@ macro_rules! include_root_path_row {
     };
 }
 
-fn populate_graphs_relation(db: &mut DbInstance) {
-    // Imports the rows into the stored relation
-    // NOTE: Doing this via a CozoScript query takes considerably more.
+fn import_graphs_data(db: &mut DbInstance, rows: Vec<Vec<DataValue>>) {
     db.import_relations(BTreeMap::from([(
         "sg_graphs".to_string(),
         NamedRows {
             headers: vec!["file".to_string(), "value".to_string()],
-            rows: vec![
-                include_graph_row!("stack_graphs/multi_file_python/main.py"),
-                include_graph_row!("stack_graphs/multi_file_python/a.py"),
-                include_graph_row!("stack_graphs/multi_file_python/b.py"),
-            ],
+            rows,
             next: None,
         },
     )]))
-    .unwrap();
+    .unwrap()
+}
 
+fn import_node_paths_data(db: &mut DbInstance, rows: Vec<Vec<DataValue>>) {
     db.import_relations(BTreeMap::from([(
         "sg_node_paths".to_string(),
         NamedRows {
@@ -67,19 +62,14 @@ fn populate_graphs_relation(db: &mut DbInstance) {
                 "start_local_id".to_string(),
                 "value".to_string(),
             ],
-            rows: vec![
-                include_node_path_row!("stack_graphs/multi_file_python/main.py", 0),
-                include_node_path_row!("stack_graphs/multi_file_python/main.py", 6),
-                include_node_path_row!("stack_graphs/multi_file_python/main.py", 8),
-                include_node_path_row!("stack_graphs/multi_file_python/a.py", 0),
-                include_node_path_row!("stack_graphs/multi_file_python/a.py", 6),
-                include_node_path_row!("stack_graphs/multi_file_python/b.py", 0),
-            ],
+            rows,
             next: None,
         },
     )]))
     .unwrap();
+}
 
+fn import_root_paths_data(db: &mut DbInstance, rows: Vec<Vec<DataValue>>) {
     db.import_relations(BTreeMap::from([(
         "sg_root_paths".to_string(),
         NamedRows {
@@ -88,11 +78,7 @@ fn populate_graphs_relation(db: &mut DbInstance) {
                 "symbol_stack".to_string(),
                 "value".to_string(),
             ],
-            rows: vec![
-                include_root_path_row!("stack_graphs/multi_file_python/main.py", "V␞__main__"),
-                include_root_path_row!("stack_graphs/multi_file_python/a.py", "V␞a"),
-                include_root_path_row!("stack_graphs/multi_file_python/b.py", "V␞b"),
-            ],
+            rows,
             next: None,
         },
     )]))
@@ -101,20 +87,17 @@ fn populate_graphs_relation(db: &mut DbInstance) {
 
 #[test]
 fn it_finds_definition_in_single_file() {
-    // Initializes database
+    // Initialize the DB
     let mut db = DbInstance::default();
     apply_db_schema(&mut db);
-    db.import_relations(BTreeMap::from([(
-        "sg_graphs".to_string(),
-        NamedRows {
-            headers: vec!["file".to_string(), "value".to_string()],
-            rows: vec![include_graph_row!(
-                "stack_graphs/single_file_python/simple.py"
-            )],
-            next: None,
-        },
-    )]))
-    .unwrap();
+
+    // Populate the DB
+    import_graphs_data(
+        &mut db,
+        vec![include_graph_row!(
+            "stack_graphs/single_file_python/simple.py"
+        )],
+    );
 
     // Perform a stack graph query
     let query = r#"
@@ -134,11 +117,41 @@ fn it_finds_definition_in_single_file() {
 }
 
 #[test]
-fn it_finds_multi_file_definition() {
-    // Initializes database
+fn it_finds_definition_across_multiple_files() {
+    // Initialize the DB
     let mut db = DbInstance::default();
     apply_db_schema(&mut db);
-    populate_graphs_relation(&mut db);
+
+    // Populate the DB
+    import_graphs_data(
+        &mut db,
+        vec![
+            include_graph_row!("stack_graphs/multi_file_python/main.py"),
+            include_graph_row!("stack_graphs/multi_file_python/a.py"),
+            include_graph_row!("stack_graphs/multi_file_python/b.py"),
+        ],
+    );
+
+    import_node_paths_data(
+        &mut db,
+        vec![
+            include_node_path_row!("stack_graphs/multi_file_python/main.py", 0),
+            include_node_path_row!("stack_graphs/multi_file_python/main.py", 6),
+            include_node_path_row!("stack_graphs/multi_file_python/main.py", 8),
+            include_node_path_row!("stack_graphs/multi_file_python/a.py", 0),
+            include_node_path_row!("stack_graphs/multi_file_python/a.py", 6),
+            include_node_path_row!("stack_graphs/multi_file_python/b.py", 0),
+        ],
+    );
+
+    import_root_paths_data(
+        &mut db,
+        vec![
+            include_root_path_row!("stack_graphs/multi_file_python/main.py", "V␞__main__"),
+            include_root_path_row!("stack_graphs/multi_file_python/a.py", "V␞a"),
+            include_root_path_row!("stack_graphs/multi_file_python/b.py", "V␞b"),
+        ],
+    );
 
     // Perform a stack graph query
     let query = r#"
