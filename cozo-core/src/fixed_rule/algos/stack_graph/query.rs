@@ -12,6 +12,7 @@ use super::{
 };
 
 /// Adapted from the [SQLite implementation].
+///
 /// [SQLite implementation]: https://github.com/github/stack-graphs/blob/3c4d1a6/tree-sitter-stack-graphs/src/cli/query.rs#L153
 pub(super) struct Querier<'state> {
     db: &'state mut State,
@@ -35,7 +36,8 @@ impl<'state> Querier<'state> {
 
         let mut all_paths = vec![];
         let config = StitcherConfig::default()
-            // always detect similar paths, we don't know the language configurations for the data in the database
+            // Always detect similar paths: we don't know the language
+            // configurations for the data in the database
             .with_detect_similar_paths(true)
             .with_collect_stats(true);
         ForwardPartialPathStitcher::find_all_complete_partial_paths(
@@ -49,10 +51,7 @@ impl<'state> Querier<'state> {
         let (graph, partials, _) = self.db.get_graph_partials_and_db();
         let mut actual_paths = vec![];
         for path in &all_paths {
-            if let Err(err) = cancellation_flag.check("shadowing") {
-                // self.reporter.failed(&log_path, "query timed out", None);
-                return Err(err.into());
-            }
+            cancellation_flag.check("shadowing")?;
 
             if all_paths
                 .iter()
@@ -65,12 +64,11 @@ impl<'state> Querier<'state> {
         Ok(actual_paths
             .into_iter()
             .filter_map(|path| {
-                // TOOD: Bail?
+                // TODO: Bail?
                 let file = graph[path.end_node].file()?; // Def. nodes should be in a file
-                let file_id = graph[file].name();
                 let byte_range = node_byte_range(graph, path.end_node)?; // Def. nodes should have source info
                 Some(AugoorUrn {
-                    file_id: file_id.into(),
+                    file_id: graph[file].name().into(),
                     byte_range,
                 })
             })

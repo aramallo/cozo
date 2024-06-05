@@ -184,15 +184,6 @@ impl ForwardCandidates<Handle<PartialPath>, PartialPath, Database, Error> for St
 pub static BINCODE_CONFIG: bincode::config::Configuration = bincode::config::standard();
 
 impl State {
-    pub(super) fn load_graph_for_file(&mut self, file_id: &str) -> Result<Handle<File>> {
-        Self::load_graph_for_file_inner(
-            file_id,
-            &mut self.graph,
-            &mut self.graph_blobs,
-            &mut self.stats,
-        )
-    }
-
     fn load_graph_for_file_inner<S: AsRef<str> + ?Sized>(
         file_id: &S,
         graph: &mut StackGraph,
@@ -213,9 +204,9 @@ impl State {
         };
 
         fn file_handle(graph: &StackGraph, file_id: &str) -> Result<Handle<File>> {
-            Ok(graph.get_file(file_id).ok_or_else(|| {
+            graph.get_file(file_id).ok_or_else(|| {
                 Error::Misc(format!("expected to have loaded file with ID {file_id:?}"))
-            })?)
+            })
         }
 
         let Some(blob) = blob.load() else {
