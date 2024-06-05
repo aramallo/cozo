@@ -49,7 +49,7 @@ impl FixedRule for StackGraphQuery {
             .iter()?
             .map(|tuple| tuple.map_err(|e| E::Misc(format!("{e:#}")))?.try_into());
 
-        let root_path_blobs = payload.get_input(1)?.ensure_min_len(3)?;
+        let root_path_blobs = payload.get_input(2)?.ensure_min_len(3)?;
         let root_path_blobs = root_path_blobs
             .iter()?
             .map(|tuple| tuple.map_err(|e| E::Misc(format!("{e:#}")))?.try_into());

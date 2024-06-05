@@ -1,7 +1,5 @@
 {:create sg_graphs {
     file: String =>
-    tag: String,
-    error: String?,
     value: Bytes
 }}
 
