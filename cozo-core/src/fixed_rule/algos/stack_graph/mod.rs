@@ -7,13 +7,13 @@ use crate::{
     DataValue, Expr, FixedRule, FixedRulePayload, Poison, RegularTempStore, SourceSpan, Symbol,
 };
 
-mod augoor_urn;
+mod source_pos;
 mod blobs;
 mod error;
 mod query;
 mod state;
 
-use augoor_urn::AugoorUrn;
+use source_pos::SourcePos;
 use error::Error;
 use query::Querier;
 
@@ -60,8 +60,8 @@ impl FixedRule for StackGraphQuery {
 
         let ref_urn = payload.string_option("reference_urn", None)?;
         let ref_urn = ref_urn
-            .parse::<AugoorUrn>()
-            .expect("Invalid URN");
+            .parse::<SourcePos>()
+            .expect("Invalid source position");
 
         let mut querier = Querier::new(&mut state);
         for def_urn in querier.definitions(&ref_urn, &PoisonCancellation(poison))? {

@@ -6,9 +6,9 @@ use stack_graphs::{
 use crate::fixed_rule::stack_graph::state::node_byte_range;
 
 use super::{
-    augoor_urn::AugoorUrn,
-    error::{Error, Result},
+    error::Result,
     state::State,
+    Error, SourcePos,
 };
 
 /// Adapted from the [SQLite implementation].
@@ -26,13 +26,13 @@ impl<'state> Querier<'state> {
 
     pub fn definitions(
         &mut self,
-        augoor_urn: &AugoorUrn,
+        source_pos: &SourcePos,
         cancellation_flag: &dyn CancellationFlag,
-    ) -> Result<Vec<AugoorUrn>> {
+    ) -> Result<Vec<SourcePos>> {
         let node = self
             .db
-            .load_node(augoor_urn)?
-            .ok_or_else(|| Error::Misc(format!("no node found for reference {augoor_urn}")))?;
+            .load_node(source_pos)?
+            .ok_or_else(|| Error::Misc(format!("no node found for reference {source_pos}")))?;
 
         let mut all_paths = vec![];
         let config = StitcherConfig::default()
@@ -67,7 +67,7 @@ impl<'state> Querier<'state> {
                 // TODO: Bail?
                 let file = graph[path.end_node].file()?; // Def. nodes should be in a file
                 let byte_range = node_byte_range(graph, path.end_node)?; // Def. nodes should have source info
-                Some(AugoorUrn {
+                Some(SourcePos {
                     file_id: graph[file].name().into(),
                     byte_range,
                 })

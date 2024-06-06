@@ -12,8 +12,8 @@
 }}
 
 {:create sg_root_paths {
-    file: String
+    file: String,
+    symbol_stack: String
     =>
-    symbol_stack: String,
     value: Bytes
 }}

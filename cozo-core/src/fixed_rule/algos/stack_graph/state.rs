@@ -15,9 +15,9 @@ use stack_graphs::{
 };
 
 use super::{
-    augoor_urn::AugoorUrn,
     blobs::{GraphBlob, NodePathBlob, RootPathBlob},
-    error::{Error, Result},
+    error::Result,
+    Error, SourcePos,
 };
 
 /// Optionally Zstd-compressed (see [`decompress_if_needed`]).
@@ -131,9 +131,9 @@ impl State {
         })
     }
 
-    pub(super) fn load_node(&mut self, urn: &AugoorUrn) -> Result<Option<Handle<Node>>> {
+    pub(super) fn load_node(&mut self, source_pos: &SourcePos) -> Result<Option<Handle<Node>>> {
         let file = Self::load_graph_for_file_inner(
-            &urn.file_id,
+            &source_pos.file_id,
             &mut self.graph,
             &mut self.graph_blobs,
             &mut self.stats,
@@ -141,7 +141,7 @@ impl State {
         Ok(self
             .graph
             .nodes_for_file(file)
-            .find(|&node| node_byte_range(&self.graph, node).is_some_and(|r| r == urn.byte_range)))
+            .find(|&node| node_byte_range(&self.graph, node).is_some_and(|r| r == source_pos.byte_range)))
     }
 }
 

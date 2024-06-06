@@ -180,12 +180,10 @@ fn it_finds_definition_across_multiple_files() {
     root_paths[file, symbol_stack, value] :=
         *sg_root_paths[file, symbol_stack, value]
 
-    ?[urn] <~ StackGraph(graphs[], node_paths[], root_paths[], reference_urn: 'urn:augr:d51340e6364531f6c2ab3325fb31157932afc17d:22:25')
+    ?[urn] <~ StackGraph(graphs[], node_paths[], root_paths[], reference_urn: 'main.py:22:25')
     "#;
     let query_result = db.run_default(query).unwrap();
 
-    let expected = vec![vec![DataValue::from(
-        "urn:augr:81ec7e8b7425cdc58b42995c832b7abf727ef570:0:3",
-    )]];
+    let expected = vec![vec![DataValue::from("b.py:0:3")]];
     assert_eq!(expected, query_result.rows);
 }
