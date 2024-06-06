@@ -436,8 +436,10 @@ fn decompress_if_needed(bytes: &[u8]) -> Cow<'_, [u8]> {
         return bytes.into();
     }
 
-    // TODO: What is a reasonable `capacity`? Or just `usize::MAX`?
-    if let Ok(decompressed_bytes) = zstd::bulk::decompress(bytes, u16::MAX as _) {
+    // TODO: What is a reasonable `capacity`?
+    // TODO: Maybe we should store the exact uncompressed size along with the blob in the DB?
+    if let Ok(mut decompressed_bytes) = zstd::bulk::decompress(bytes, u16::MAX as _) {
+        decompressed_bytes.shrink_to_fit();
         decompressed_bytes.into()
     } else {
         // Could not decompress, so just return the original bytes and let
