@@ -14,6 +14,8 @@ pub enum Error {
     UnknownFile(String),
     #[error("missing {0}")]
     MissingData(String),
+    #[error("invalid source position {got:?}")]
+    InvalidSourcePos { got: String, source: super::source_pos::ParseError },
     #[error("failed to deserialize blob for {what}")]
     DeserializeBlob { what: String, source: DeserializeError },
     #[error("failed to find definition for source position {0}")]

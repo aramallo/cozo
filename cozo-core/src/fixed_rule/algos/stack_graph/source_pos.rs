@@ -6,27 +6,35 @@ pub struct SourcePos {
     pub byte_range: Range<u32>, // TODO: Line/column instead?
 }
 
+#[derive(Debug, thiserror::Error)]
+pub enum ParseError {
+    #[error("missing colon before {which} byte offset")]
+    MissingColon { which: String },
+    #[error("invalid {which} byte offset")]
+    InvalidByteOffset { which: String, source: std::num::ParseIntError },
+}
+
 impl FromStr for SourcePos {
-    type Err = String;
-    fn from_str(s: &str) -> Result<Self, String> {
+    type Err = ParseError;
+    fn from_str(s: &str) -> Result<Self, ParseError> {
         let mut rev_bytes = s.bytes().rev();
         let pos_colon_1 = rev_bytes
             .position(|b| b == b':')
-            .ok_or("expected colon before end byte")?;
+            .ok_or_else(|| ParseError::MissingColon { which: "end".into() })?;
         let end_byte = &s[s.len() - pos_colon_1..];
         let pos_colon_2 = rev_bytes
             .position(|b| b == b':')
-            .ok_or("expected colon before start byte")?;
+            .ok_or_else(|| ParseError::MissingColon { which: "start".into() })?;
         let start_byte = &s[s.len() - pos_colon_1 - 1 - pos_colon_2..s.len() - pos_colon_1 - 1];
 
         let file_id = &s[..s.len() - pos_colon_1 - 2 - pos_colon_2];
 
         let start_byte = start_byte
             .parse::<u32>()
-            .map_err(|_| "Invalid URN start_byte".to_string())?;
+            .map_err(|e| ParseError::InvalidByteOffset { which: "start".into(), source: e })?;
         let end_byte = end_byte
             .parse::<u32>()
-            .map_err(|_| "Invalid URN end_byte".to_string())?;
+            .map_err(|e| ParseError::InvalidByteOffset { which: "end".into(), source: e })?;
 
         Ok(SourcePos {
             file_id: file_id.to_string(),

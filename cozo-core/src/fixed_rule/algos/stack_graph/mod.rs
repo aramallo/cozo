@@ -61,7 +61,7 @@ impl FixedRule for StackGraphQuery {
         let ref_urn = payload.string_option("reference_urn", None)?;
         let ref_urn = ref_urn
             .parse::<SourcePos>()
-            .expect("Invalid source position");
+            .map_err(|e| Error::InvalidSourcePos { got: ref_urn.into(), source: e })?;
 
         let mut querier = Querier::new(&mut state);
         for def_urn in querier.definitions(&ref_urn, &PoisonCancellation(poison))? {
