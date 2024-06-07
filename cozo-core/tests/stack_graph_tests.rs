@@ -11,31 +11,33 @@ fn apply_db_schema(db: &mut DbInstance) {
 }
 
 macro_rules! include_graph_row {
-    ($path:expr) => {
+    ($dir:expr, $file:expr) => {
         vec![
-            DataValue::from(include_str!(concat!($path, ".blob_oid.txt"))),
-            DataValue::from(include_bytes!(concat!($path, ".graph.bin")).to_vec()),
+            DataValue::from($file),
+            DataValue::from(include_bytes!(concat!($dir, $file, ".graph.bin")).to_vec()),
         ]
     };
 }
 
 macro_rules! include_node_path_row {
-    ($path:expr, $start:literal) => {
+    ($dir:expr, $file:expr, $start:literal) => {
         vec![
-            DataValue::from(include_str!(concat!($path, ".blob_oid.txt"))),
+            DataValue::from($file),
             DataValue::from($start),
-            DataValue::from(include_bytes!(concat!($path, ".node_path.", $start, ".bin")).to_vec()),
+            DataValue::from(
+                include_bytes!(concat!($dir, $file, ".node_path.", $start, ".bin")).to_vec(),
+            ),
         ]
     };
 }
 
 macro_rules! include_root_path_row {
-    ($path:expr, $symbol_stack:literal) => {
+    ($dir:expr, $file:expr, $symbol_stack:literal) => {
         vec![
-            DataValue::from(include_str!(concat!($path, ".blob_oid.txt"))),
+            DataValue::from($file),
             DataValue::from($symbol_stack),
             DataValue::from(
-                include_bytes!(concat!($path, ".root_path.", $symbol_stack, ".bin")).to_vec(),
+                include_bytes!(concat!($dir, $file, ".root_path.", $symbol_stack, ".bin")).to_vec(),
             ),
         ]
     };
@@ -95,22 +97,24 @@ fn it_finds_definition_in_single_file() {
     import_graphs_data(
         &mut db,
         vec![include_graph_row!(
-            "stack_graphs/single_file_python/simple.py"
+            "stack_graphs/single_file_python/",
+            "simple.py"
         )],
     );
 
     import_node_paths_data(
         &mut db,
         vec![
-            include_node_path_row!("stack_graphs/single_file_python/simple.py", 0),
-            include_node_path_row!("stack_graphs/single_file_python/simple.py", 7),
+            include_node_path_row!("stack_graphs/single_file_python/", "simple.py", 0),
+            include_node_path_row!("stack_graphs/single_file_python/", "simple.py", 7),
         ],
     );
 
     import_root_paths_data(
         &mut db,
         vec![include_root_path_row!(
-            "stack_graphs/single_file_python/simple.py",
+            "stack_graphs/single_file_python/",
+            "simple.py",
             "V␞__main__"
         )],
     );
@@ -124,13 +128,11 @@ fn it_finds_definition_in_single_file() {
     root_paths[file, symbol_stack, value] :=
         *sg_root_paths[file, symbol_stack, value]
 
-    ?[urn] <~ StackGraph(graphs[], node_paths[], root_paths[], reference_urn: 'urn:augr:c329c84559b085714c39b872fe5e8df0a39f0a64:13:14')
+    ?[urn] <~ StackGraph(graphs[], node_paths[], root_paths[], reference_urn: 'simple.py:13:14')
     "#;
     let query_result = db.run_default(query).unwrap();
 
-    let expected = vec![vec![DataValue::from(
-        "urn:augr:c329c84559b085714c39b872fe5e8df0a39f0a64:0:1",
-    )]];
+    let expected = vec![vec![DataValue::from("simple.py:0:1")]];
     assert_eq!(expected, query_result.rows);
 }
 
@@ -144,30 +146,30 @@ fn it_finds_definition_across_multiple_files() {
     import_graphs_data(
         &mut db,
         vec![
-            include_graph_row!("stack_graphs/multi_file_python/main.py"),
-            include_graph_row!("stack_graphs/multi_file_python/a.py"),
-            include_graph_row!("stack_graphs/multi_file_python/b.py"),
+            include_graph_row!("stack_graphs/multi_file_python/", "main.py"),
+            include_graph_row!("stack_graphs/multi_file_python/", "a.py"),
+            include_graph_row!("stack_graphs/multi_file_python/", "b.py"),
         ],
     );
 
     import_node_paths_data(
         &mut db,
         vec![
-            include_node_path_row!("stack_graphs/multi_file_python/main.py", 0),
-            include_node_path_row!("stack_graphs/multi_file_python/main.py", 6),
-            include_node_path_row!("stack_graphs/multi_file_python/main.py", 8),
-            include_node_path_row!("stack_graphs/multi_file_python/a.py", 0),
-            include_node_path_row!("stack_graphs/multi_file_python/a.py", 6),
-            include_node_path_row!("stack_graphs/multi_file_python/b.py", 0),
+            include_node_path_row!("stack_graphs/multi_file_python/", "main.py", 0),
+            include_node_path_row!("stack_graphs/multi_file_python/", "main.py", 6),
+            include_node_path_row!("stack_graphs/multi_file_python/", "main.py", 8),
+            include_node_path_row!("stack_graphs/multi_file_python/", "a.py", 0),
+            include_node_path_row!("stack_graphs/multi_file_python/", "a.py", 6),
+            include_node_path_row!("stack_graphs/multi_file_python/", "b.py", 0),
         ],
     );
 
     import_root_paths_data(
         &mut db,
         vec![
-            include_root_path_row!("stack_graphs/multi_file_python/main.py", "V␞__main__"),
-            include_root_path_row!("stack_graphs/multi_file_python/a.py", "V␞a"),
-            include_root_path_row!("stack_graphs/multi_file_python/b.py", "V␞b"),
+            include_root_path_row!("stack_graphs/multi_file_python/", "main.py", "V␞__main__"),
+            include_root_path_row!("stack_graphs/multi_file_python/", "a.py", "V␞a"),
+            include_root_path_row!("stack_graphs/multi_file_python/", "b.py", "V␞b"),
         ],
     );
 
