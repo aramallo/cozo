@@ -189,3 +189,52 @@ fn it_finds_definition_across_multiple_files() {
     let expected = vec![vec![DataValue::from("b.py:0:3")]];
     assert_eq!(expected, query_result.rows);
 }
+
+#[test]
+fn it_returns_empty_without_errors_if_definition_is_not_available() {
+    // Initialize the DB
+    let mut db = DbInstance::default();
+    apply_db_schema(&mut db);
+
+    // Populate the DB
+    import_graphs_data(
+        &mut db,
+        vec![include_graph_row!(
+            "stack_graphs/multi_file_python/",
+            "main.py"
+        )],
+    );
+
+    import_node_paths_data(
+        &mut db,
+        vec![
+            include_node_path_row!("stack_graphs/multi_file_python/", "main.py", 0),
+            include_node_path_row!("stack_graphs/multi_file_python/", "main.py", 6),
+            include_node_path_row!("stack_graphs/multi_file_python/", "main.py", 8),
+        ],
+    );
+
+    import_root_paths_data(
+        &mut db,
+        vec![include_root_path_row!(
+            "stack_graphs/multi_file_python/",
+            "main.py",
+            "V␞__main__"
+        )],
+    );
+
+    // Perform a stack graph query
+    let query = r#"
+    graphs[file, value] :=
+        *sg_graphs[file, value]
+    node_paths[file, start_local_id, value] :=
+        *sg_node_paths[file, start_local_id, value]
+    root_paths[file, symbol_stack, value] :=
+        *sg_root_paths[file, symbol_stack, value]
+
+    ?[urn] <~ StackGraph(graphs[], node_paths[], root_paths[], reference_urn: 'main.py:22:25')
+    "#;
+    let query_result = db.run_default(query).unwrap();
+
+    assert!(query_result.rows.is_empty());
+}
