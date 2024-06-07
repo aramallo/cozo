@@ -12,7 +12,7 @@ pub enum Error {
     #[error("database does not exist {0}")]
     MissingDatabase(String),
     #[error("invalid database tuple")]
-    InvalidTuple,
+    Tuple(#[from] super::blobs::TupleError),
     #[error(transparent)]
     Serde(#[from] stack_graphs::serde::Error),
     #[error(transparent)]

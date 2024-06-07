@@ -1,4 +1,4 @@
-use crate::data::tuple::Tuple;
+use crate::data::{tuple::Tuple, value::DataValue};
 
 use super::error::Error;
 
@@ -22,16 +22,25 @@ pub struct RootPathBlob {
     pub blob: Box<[u8]>,
 }
 
+#[derive(Debug, thiserror::Error)]
+pub enum TupleError {
+    #[error("invalid tuple length; expected {expected} but got {got}")]
+    Len { expected: usize, got: usize },
+    #[error("invalid tuple element type at index {idx}; expected {expected} but got {got}")]
+    ElemType {
+        idx: usize,
+        expected: &'static str,
+        got: &'static str,
+    },
+}
+
 impl TryFrom<Tuple> for GraphBlob {
     type Error = Error;
     fn try_from(tuple: Tuple) -> Result<Self, Self::Error> {
-        if tuple.len() != 2 {
-            return Err(Self::Error::InvalidTuple);
-        }
+        tuple.check_len(2)?;
 
-        // TODO: More specific errors (e.g. “InvalidTupleElemType”)?
-        let file_id = tuple[0].get_str().ok_or(Self::Error::InvalidTuple)?;
-        let blob = tuple[1].get_bytes().ok_or(Self::Error::InvalidTuple)?;
+        let file_id = tuple.get_elem(0, DataValue::get_str, "string", None)?;
+        let blob = tuple.get_elem(1, DataValue::get_bytes, "bytes", None)?;
 
         Ok(Self {
             file_id: file_id.into(),
@@ -43,19 +52,15 @@ impl TryFrom<Tuple> for GraphBlob {
 impl TryFrom<Tuple> for NodePathBlob {
     type Error = Error;
     fn try_from(tuple: Tuple) -> Result<Self, Self::Error> {
-        if tuple.len() != 3 {
-            return Err(Self::Error::InvalidTuple);
-        }
+        tuple.check_len(3)?;
 
-        // TODO: More specific errors (e.g. “InvalidTupleElemType”)?
-        let file_id = tuple[0].get_str().ok_or(Self::Error::InvalidTuple)?;
-        let start_node_local_id = tuple[1]
-            .get_non_neg_int()
-            .ok_or(Self::Error::InvalidTuple)?;
-        let start_node_local_id = start_node_local_id
-            .try_into()
-            .map_err(|_| Self::Error::InvalidTuple)?;
-        let blob = tuple[2].get_bytes().ok_or(Self::Error::InvalidTuple)?;
+        let file_id = tuple.get_elem(0, DataValue::get_str, "string", None)?;
+        let start_node_local_id =
+            tuple.get_elem(1, DataValue::get_non_neg_int, "non-negative integer", None)?;
+        let start_node_local_id = start_node_local_id.try_into().map_err(|_| {
+            TupleError::elem_type(1, "32-bit integer", Some("bigger integer"), &tuple)
+        })?;
+        let blob = tuple.get_elem(2, DataValue::get_bytes, "bytes", None)?;
 
         // TODO: replace unwrap and handle error
         Ok(Self {
@@ -69,14 +74,11 @@ impl TryFrom<Tuple> for NodePathBlob {
 impl TryFrom<Tuple> for RootPathBlob {
     type Error = Error;
     fn try_from(tuple: Tuple) -> Result<Self, Self::Error> {
-        if tuple.len() != 3 {
-            return Err(Self::Error::InvalidTuple);
-        }
+        tuple.check_len(3)?;
 
-        // TODO: More specific errors (e.g. “InvalidTupleElemType”)?
-        let file_id = tuple[0].get_str().ok_or(Self::Error::InvalidTuple)?;
-        let precondition_symbol_stack = tuple[1].get_str().ok_or(Self::Error::InvalidTuple)?;
-        let blob = tuple[2].get_bytes().ok_or(Self::Error::InvalidTuple)?;
+        let file_id = tuple.get_elem(0, DataValue::get_str, "string", None)?;
+        let precondition_symbol_stack = tuple.get_elem(1, DataValue::get_str, "string", None)?;
+        let blob = tuple.get_elem(2, DataValue::get_bytes, "bytes", None)?;
 
         // TODO: replace unwrap and handle error
         Ok(Self {
@@ -84,5 +86,72 @@ impl TryFrom<Tuple> for RootPathBlob {
             precondition_symbol_stack: precondition_symbol_stack.into(),
             blob: blob.into(),
         })
+    }
+}
+
+trait TupleExt {
+    fn check_len(&self, expected: usize) -> Result<(), TupleError>;
+    fn get_elem<'t, T, F>(
+        &'t self,
+        idx: usize,
+        get: F,
+        expected: &'static str,
+        got: Option<&'static str>,
+    ) -> Result<T, TupleError>
+    where
+        F: FnOnce(&'t DataValue) -> Option<T>;
+}
+
+impl TupleExt for Tuple {
+    fn check_len(&self, expected: usize) -> Result<(), TupleError> {
+        if self.len() != expected {
+            return Err(TupleError::Len {
+                expected,
+                got: self.len(),
+            });
+        }
+        Ok(())
+    }
+
+    fn get_elem<'t, T, F>(
+        &'t self,
+        idx: usize,
+        get: F,
+        expected: &'static str,
+        got: Option<&'static str>,
+    ) -> Result<T, TupleError>
+    where
+        F: FnOnce(&'t DataValue) -> Option<T>,
+    {
+        get(&self[idx]).ok_or_else(|| TupleError::elem_type(idx, expected, got, self))
+    }
+}
+
+impl TupleError {
+    fn elem_type(
+        idx: usize,
+        expected: &'static str,
+        got: Option<&'static str>,
+        tuple: &Tuple,
+    ) -> Self {
+        Self::ElemType {
+            idx,
+            expected,
+            got: got.unwrap_or_else(|| match &tuple[idx] {
+                DataValue::Null => "null",
+                DataValue::Bool(_) => "boolean",
+                DataValue::Num(_) => "number",
+                DataValue::Str(_) => "string",
+                DataValue::Bytes(_) => "bytes",
+                DataValue::Uuid(_) => "uuid",
+                DataValue::Regex(_) => "regex",
+                DataValue::List(_) => "list",
+                DataValue::Set(_) => "set",
+                DataValue::Vec(_) => "vec",
+                DataValue::Json(_) => "json",
+                DataValue::Validity(_) => "validity",
+                DataValue::Bot => "bot",
+            }),
+        }
     }
 }
