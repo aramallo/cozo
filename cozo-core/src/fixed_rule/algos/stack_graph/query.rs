@@ -32,7 +32,7 @@ impl<'state> Querier<'state> {
         let node = self
             .db
             .load_node(source_pos)?
-            .ok_or_else(|| Error::Misc(format!("no node found for reference {source_pos}")))?;
+            .ok_or_else(|| Error::Query(source_pos.clone()))?;
 
         let mut all_paths = vec![];
         let config = StitcherConfig::default()

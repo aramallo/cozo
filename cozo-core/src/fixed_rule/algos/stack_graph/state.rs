@@ -75,10 +75,7 @@ impl State {
             let graph_blob = graph_blob?;
             let HashEntry::Vacant(entry) = indexed_graph_blobs.entry(graph_blob.file_id.clone())
             else {
-                return Err(Error::Misc(format!(
-                    "file with ID {:?} already exists",
-                    graph_blob.file_id
-                )));
+                return Err(Error::DuplicateGraph(graph_blob.file_id.into()));
             };
             entry.insert(LoadState::Unloaded(graph_blob.blob));
         }
@@ -87,10 +84,7 @@ impl State {
         for node_path_blob in node_path_blobs {
             let node_path_blob = node_path_blob?;
             if !indexed_graph_blobs.contains_key(node_path_blob.file_id.as_ref()) {
-                return Err(Error::Misc(format!(
-                    "no known file with ID {:?}",
-                    node_path_blob.file_id
-                )));
+                return Err(Error::UnknownFile(node_path_blob.file_id.into()));
             }
             let node_id = (node_path_blob.file_id, node_path_blob.start_node_local_id);
             let LoadState::Unloaded(blobs) = indexed_node_path_blobs
@@ -106,10 +100,7 @@ impl State {
         for root_path_blob in root_path_blobs {
             let root_path_blob = root_path_blob?;
             if !indexed_graph_blobs.contains_key(root_path_blob.file_id.as_ref()) {
-                return Err(Error::Misc(format!(
-                    "no known file with ID {:?}",
-                    root_path_blob.file_id
-                )));
+                return Err(Error::UnknownFile(root_path_blob.file_id.into()));
             };
             let LoadState::Unloaded(files_blobs) = indexed_root_path_blobs
                 .entry(root_path_blob.precondition_symbol_stack)
@@ -138,10 +129,9 @@ impl State {
             &mut self.graph_blobs,
             &mut self.stats,
         )?;
-        Ok(self
-            .graph
-            .nodes_for_file(file)
-            .find(|&node| node_byte_range(&self.graph, node).is_some_and(|r| r == source_pos.byte_range)))
+        Ok(self.graph.nodes_for_file(file).find(|&node| {
+            node_byte_range(&self.graph, node).is_some_and(|r| r == source_pos.byte_range)
+        }))
     }
 }
 
@@ -194,19 +184,21 @@ impl State {
 
         // copious_debugging!("--> Load graph for {}", file);
 
+        macro_rules! err_what {
+            ($prefix:literal, $file_id:ident) => {
+                format!("{}file with ID {:?}", $prefix, $file_id)
+            };
+        }
+
         let Some(blob) = graph_blobs.get_mut(file_id) else {
             // copious_debugging!("   > Already loaded");
-            eprintln!("No graph for key {file_id:?}");
-            return Err(Error::MissingData(format!(
-                "graph for file key {:?}",
-                file_id,
-            )));
+            return Err(Error::MissingData(err_what!("data for ", file_id)));
         };
 
         fn file_handle(graph: &StackGraph, file_id: &str) -> Result<Handle<File>> {
-            graph.get_file(file_id).ok_or_else(|| {
-                Error::Misc(format!("expected to have loaded file with ID {file_id:?}"))
-            })
+            graph
+                .get_file(file_id)
+                .ok_or_else(|| Error::MissingData(err_what!("file handle in graph for ", file_id)))
         }
 
         let Some(blob) = blob.load() else {
@@ -220,8 +212,11 @@ impl State {
         // copious_debugging!(" * Load from database");
         stats.file_loads += 1;
         let (file_graph, _): (sg_serde::StackGraph, _) =
-            bincode::decode_from_slice(&blob, BINCODE_CONFIG)?;
-        file_graph.load_into(graph)?;
+            bincode::decode_from_slice(&blob, BINCODE_CONFIG)
+                .map_err(|e| Error::decode(err_what!("graph in", file_id), e))?;
+        file_graph
+            .load_into(graph)
+            .map_err(|e| Error::load(err_what!("graph in", file_id), e))?;
         file_handle(graph, file_id)
     }
 
@@ -256,12 +251,23 @@ impl State {
         // #[cfg_attr(not(feature = "copious-debugging"), allow(unused))]
         // let mut count = 0usize;
 
+        let err_what = || {
+            format!(
+                "node path with start node {} in file with ID {:?}",
+                blob_key.1, blob_key.0,
+            )
+        };
+
         for blob in blobs {
-            cancellation_flag.check("loading file paths")?;
+            cancellation_flag.check("loading node paths")?;
+
             let blob = decompress_if_needed(&blob);
             let (path, _): (sg_serde::PartialPath, _) =
-                bincode::decode_from_slice(&blob, BINCODE_CONFIG)?;
-            let path = path.to_partial_path(&mut self.graph, &mut self.partials)?;
+                bincode::decode_from_slice(&blob, BINCODE_CONFIG)
+                    .map_err(|e| Error::decode(err_what(), e))?;
+            let path = path
+                .to_partial_path(&mut self.graph, &mut self.partials)
+                .map_err(|e| Error::load(err_what(), e))?;
 
             // copious_debugging!(
             //     "   > Loaded {}",
@@ -308,8 +314,11 @@ impl State {
             // #[cfg_attr(not(feature = "copious-debugging"), allow(unused))]
             // let mut count = 0usize;
 
+            let err_what = || format!("root path with symbol stack {:?}", symbol_stack);
+
             for (file, blob) in blobs {
                 cancellation_flag.check("loading root paths")?;
+
                 Self::load_graph_for_file_inner(
                     &file,
                     &mut self.graph,
@@ -318,8 +327,11 @@ impl State {
                 )?;
                 let blob = decompress_if_needed(&blob);
                 let (path, _): (sg_serde::PartialPath, _) =
-                    bincode::decode_from_slice(&blob, BINCODE_CONFIG)?;
-                let path = path.to_partial_path(&mut self.graph, &mut self.partials)?;
+                    bincode::decode_from_slice(&blob, BINCODE_CONFIG)
+                        .map_err(|e| Error::decode(err_what(), e))?;
+                let path = path
+                    .to_partial_path(&mut self.graph, &mut self.partials)
+                    .map_err(|e| Error::load(err_what(), e))?;
 
                 // copious_debugging!(
                 //     "   > Loaded {}",

@@ -1,37 +1,22 @@
 use crate::data::{tuple::Tuple, value::DataValue};
 
-use super::error::Error;
+use super::error::{Error, TupleError};
 
 pub struct GraphBlob {
-    /// BLOB_OID, or maybe full file path if needed
     pub file_id: Box<str>,
     pub blob: Box<[u8]>,
 }
 
 pub struct NodePathBlob {
-    /// BLOB_OID, or maybe full file path if needed
     pub file_id: Box<str>,
     pub start_node_local_id: u32,
     pub blob: Box<[u8]>,
 }
 
 pub struct RootPathBlob {
-    /// BLOB_OID, or maybe full file path if needed
     pub file_id: Box<str>,
     pub precondition_symbol_stack: Box<str>,
     pub blob: Box<[u8]>,
-}
-
-#[derive(Debug, thiserror::Error)]
-pub enum TupleError {
-    #[error("invalid tuple length; expected {expected} but got {got}")]
-    Len { expected: usize, got: usize },
-    #[error("invalid tuple element type at index {idx}; expected {expected} but got {got}")]
-    ElemType {
-        idx: usize,
-        expected: &'static str,
-        got: &'static str,
-    },
 }
 
 impl TryFrom<Tuple> for GraphBlob {

@@ -44,17 +44,17 @@ impl FixedRule for StackGraphQuery {
         let graph_blobs = payload.get_input(0)?.ensure_min_len(2)?;
         let graph_blobs = graph_blobs
             .iter()?
-            .map(|tuple| tuple.map_err(|e| E::Misc(format!("{e:#}")))?.try_into());
+            .map(|tuple| tuple.map_err(E::tuple_report)?.try_into());
 
         let node_path_blobs = payload.get_input(1)?.ensure_min_len(3)?;
         let node_path_blobs = node_path_blobs
             .iter()?
-            .map(|tuple| tuple.map_err(|e| E::Misc(format!("{e:#}")))?.try_into());
+            .map(|tuple| tuple.map_err(E::tuple_report)?.try_into());
 
         let root_path_blobs = payload.get_input(2)?.ensure_min_len(3)?;
         let root_path_blobs = root_path_blobs
             .iter()?
-            .map(|tuple| tuple.map_err(|e| E::Misc(format!("{e:#}")))?.try_into());
+            .map(|tuple| tuple.map_err(E::tuple_report)?.try_into());
 
         let mut state = state::State::new(graph_blobs, node_path_blobs, root_path_blobs)?;
 
