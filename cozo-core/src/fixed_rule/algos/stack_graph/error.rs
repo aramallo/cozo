@@ -15,9 +15,15 @@ pub enum Error {
     #[error("missing {0}")]
     MissingData(String),
     #[error("invalid source position {got:?}")]
-    InvalidSourcePos { got: String, source: super::source_pos::ParseError },
+    InvalidSourcePos {
+        got: String,
+        source: super::source_pos::ParseError,
+    },
     #[error("failed to deserialize blob for {what}")]
-    DeserializeBlob { what: String, source: DeserializeError },
+    DeserializeBlob {
+        what: String,
+        source: DeserializeBlobError,
+    },
     #[error("failed to find definition for source position {0}")]
     Query(super::SourcePos),
 }
@@ -46,7 +52,7 @@ pub struct DecodeError(#[from] bincode::error::DecodeError);
 pub struct LoadError(#[from] stack_graphs::serde::Error);
 
 #[derive(Debug, Error)]
-pub enum DeserializeError {
+pub enum DeserializeBlobError {
     #[error(transparent)]
     Decode(#[from] DecodeError),
     #[error(transparent)]
@@ -55,11 +61,17 @@ pub enum DeserializeError {
 
 impl Error {
     pub(super) fn decode(what: String, source: bincode::error::DecodeError) -> Self {
-        Self::DeserializeBlob { what, source: DeserializeError::Decode(DecodeError(source)) }
+        Self::DeserializeBlob {
+            what,
+            source: DeserializeBlobError::Decode(DecodeError(source)),
+        }
     }
 
     pub(super) fn load(what: String, source: stack_graphs::serde::Error) -> Self {
-        Self::DeserializeBlob { what, source: DeserializeError::Load(LoadError(source)) }
+        Self::DeserializeBlob {
+            what,
+            source: DeserializeBlobError::Load(LoadError(source)),
+        }
     }
 }
 
