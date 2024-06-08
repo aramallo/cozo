@@ -9,9 +9,9 @@ pub struct SourcePos {
 #[derive(Debug, thiserror::Error)]
 pub enum ParseError {
     #[error("missing colon before {which} byte offset")]
-    MissingColon { which: String },
+    MissingColon { which: &'static str },
     #[error("invalid {which} byte offset")]
-    InvalidByteOffset { which: String, source: std::num::ParseIntError },
+    InvalidByteOffset { which: &'static str, source: std::num::ParseIntError },
 }
 
 impl FromStr for SourcePos {
@@ -20,21 +20,21 @@ impl FromStr for SourcePos {
         let mut rev_bytes = s.bytes().rev();
         let pos_colon_1 = rev_bytes
             .position(|b| b == b':')
-            .ok_or_else(|| ParseError::MissingColon { which: "end".into() })?;
+            .ok_or(ParseError::MissingColon { which: "end" })?;
         let end_byte = &s[s.len() - pos_colon_1..];
         let pos_colon_2 = rev_bytes
             .position(|b| b == b':')
-            .ok_or_else(|| ParseError::MissingColon { which: "start".into() })?;
+            .ok_or(ParseError::MissingColon { which: "start" })?;
         let start_byte = &s[s.len() - pos_colon_1 - 1 - pos_colon_2..s.len() - pos_colon_1 - 1];
 
         let file_id = &s[..s.len() - pos_colon_1 - 2 - pos_colon_2];
 
         let start_byte = start_byte
             .parse::<u32>()
-            .map_err(|e| ParseError::InvalidByteOffset { which: "start".into(), source: e })?;
+            .map_err(|e| ParseError::InvalidByteOffset { which: "start", source: e })?;
         let end_byte = end_byte
             .parse::<u32>()
-            .map_err(|e| ParseError::InvalidByteOffset { which: "end".into(), source: e })?;
+            .map_err(|e| ParseError::InvalidByteOffset { which: "end", source: e })?;
 
         Ok(SourcePos {
             file_id: file_id.to_string(),
