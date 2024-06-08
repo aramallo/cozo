@@ -24,7 +24,7 @@ pub enum Error {
         what: String,
         source: DeserializeBlobError,
     },
-    #[error("failed to find definition for source position {0}")]
+    #[error("failed to find reference at source position {0}")]
     Query(super::SourcePos),
 }
 
