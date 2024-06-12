@@ -2,24 +2,26 @@ use crate::data::{tuple::Tuple, value::DataValue};
 
 use super::error::{Error, TupleError};
 
+pub struct Blob {
+    pub uncompressed_len: usize,
+    pub data: Box<[u8]>,
+}
+
 pub struct GraphBlob {
     pub file_id: Box<str>,
-    pub uncompressed_blob_len: usize,
-    pub blob: Box<[u8]>,
+    pub blob: Blob,
 }
 
 pub struct NodePathBlob {
     pub file_id: Box<str>,
     pub start_node_local_id: u32,
-    pub uncompressed_blob_len: usize,
-    pub blob: Box<[u8]>,
+    pub blob: Blob,
 }
 
 pub struct RootPathBlob {
     pub file_id: Box<str>,
     pub precondition_symbol_stack: Box<str>,
-    pub uncompressed_blob_len: usize,
-    pub blob: Box<[u8]>,
+    pub blob: Blob,
 }
 
 impl TryFrom<Tuple> for GraphBlob {
@@ -34,8 +36,10 @@ impl TryFrom<Tuple> for GraphBlob {
 
         Ok(Self {
             file_id: file_id.into(),
-            uncompressed_blob_len: uncompressed_blob_len as _,
-            blob: blob.into(),
+            blob: Blob {
+                uncompressed_len: uncompressed_blob_len as _,
+                data: blob.into(),
+            },
         })
     }
 }
@@ -59,8 +63,10 @@ impl TryFrom<Tuple> for NodePathBlob {
         Ok(Self {
             file_id: file_id.into(),
             start_node_local_id,
-            uncompressed_blob_len: uncompressed_blob_len as _,
-            blob: blob.into(),
+            blob: Blob {
+                uncompressed_len: uncompressed_blob_len as _,
+                data: blob.into(),
+            },
         })
     }
 }
@@ -80,8 +86,10 @@ impl TryFrom<Tuple> for RootPathBlob {
         Ok(Self {
             file_id: file_id.into(),
             precondition_symbol_stack: precondition_symbol_stack.into(),
-            uncompressed_blob_len: uncompressed_blob_len as _,
-            blob: blob.into(),
+            blob: Blob {
+                uncompressed_len: uncompressed_blob_len as _,
+                data: blob.into(),
+            },
         })
     }
 }

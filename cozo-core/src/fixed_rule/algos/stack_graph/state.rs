@@ -15,16 +15,12 @@ use stack_graphs::{
 };
 
 use super::{
-    blobs::{GraphBlob, NodePathBlob, RootPathBlob},
+    blobs::{Blob, GraphBlob, NodePathBlob, RootPathBlob},
     error::Result,
     Error, SourcePos,
 };
 
 /// Optionally Zstd-compressed (see [`decompress_if_needed`]).
-struct Blob {
-    uncompressed_len: usize,
-    data: Box<[u8]>,
-}
 
 type FileID = Box<str>;
 type NodeID = (FileID, u32);
@@ -80,10 +76,7 @@ impl State {
             else {
                 return Err(Error::DuplicateGraph(graph_blob.file_id.into()));
             };
-            entry.insert(LoadState::Unloaded(Blob {
-                uncompressed_len: graph_blob.uncompressed_blob_len,
-                data: graph_blob.blob,
-            }));
+            entry.insert(LoadState::Unloaded(graph_blob.blob));
         }
 
         let mut indexed_node_path_blobs = HashMap::new();
@@ -99,10 +92,7 @@ impl State {
             else {
                 unreachable!()
             };
-            blobs.push(Blob {
-                uncompressed_len: node_path_blob.uncompressed_blob_len,
-                data: node_path_blob.blob,
-            });
+            blobs.push(node_path_blob.blob);
         }
 
         let mut indexed_root_path_blobs = HashMap::new();
@@ -117,13 +107,7 @@ impl State {
             else {
                 unreachable!()
             };
-            files_blobs.push((
-                root_path_blob.file_id,
-                Blob {
-                    uncompressed_len: root_path_blob.uncompressed_blob_len,
-                    data: root_path_blob.blob,
-                },
-            ));
+            files_blobs.push((root_path_blob.file_id, root_path_blob.blob));
         }
 
         Ok(Self {
