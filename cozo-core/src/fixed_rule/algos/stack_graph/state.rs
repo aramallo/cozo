@@ -213,10 +213,10 @@ impl State {
         stats.file_loads += 1;
         let (file_graph, _): (sg_serde::StackGraph, _) =
             bincode::decode_from_slice(&blob, BINCODE_CONFIG)
-                .map_err(|e| Error::decode(err_what!("graph in", file_id), e))?;
+                .map_err(|e| Error::decode(err_what!("graph in ", file_id), e))?;
         file_graph
             .load_into(graph)
-            .map_err(|e| Error::load(err_what!("graph in", file_id), e))?;
+            .map_err(|e| Error::load(err_what!("graph in ", file_id), e))?;
         file_handle(graph, file_id)
     }
 
