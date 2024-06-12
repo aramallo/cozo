@@ -29,10 +29,12 @@ impl<'state> Querier<'state> {
         source_pos: &SourcePos,
         cancellation_flag: &dyn CancellationFlag,
     ) -> Result<Vec<SourcePos>> {
-        let node = self
+        let nodes = self
             .db
-            .load_node(source_pos)?
-            .ok_or_else(|| Error::Query(source_pos.clone()))?;
+            .load_nodes(source_pos)?
+            .collect::<Vec<_>>();
+
+        if nodes.is_empty() { return Err(Error::Query(source_pos.clone())) }
 
         let mut all_paths = vec![];
         let config = StitcherConfig::default()
@@ -42,7 +44,7 @@ impl<'state> Querier<'state> {
             .with_collect_stats(true);
         ForwardPartialPathStitcher::find_all_complete_partial_paths(
             self.db,
-            std::iter::once(node),
+            nodes,
             config,
             cancellation_flag,
             |_g, _ps, path| all_paths.push(path.clone()),

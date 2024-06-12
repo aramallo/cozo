@@ -122,14 +122,14 @@ impl State {
         })
     }
 
-    pub(super) fn load_node(&mut self, source_pos: &SourcePos) -> Result<Option<Handle<Node>>> {
+    pub(super) fn load_nodes<'s>(&'s mut self, source_pos: &'s SourcePos) -> Result<impl Iterator<Item = Handle<Node>> + 's> {
         let file = Self::load_graph_for_file_inner(
             &source_pos.file_id,
             &mut self.graph,
             &mut self.graph_blobs,
             &mut self.stats,
         )?;
-        Ok(self.graph.nodes_for_file(file).find(|&node| {
+        Ok(self.graph.nodes_for_file(file).filter(|&node| {
             node_byte_range(&self.graph, node).is_some_and(|r| r == source_pos.byte_range)
         }))
     }
