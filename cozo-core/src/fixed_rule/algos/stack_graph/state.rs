@@ -21,7 +21,10 @@ use super::{
 };
 
 /// Optionally Zstd-compressed (see [`decompress_if_needed`]).
-type Blob = Box<[u8]>;
+struct Blob {
+    uncompressed_len: usize,
+    data: Box<[u8]>,
+}
 
 type FileID = Box<str>;
 type NodeID = (FileID, u32);
@@ -77,7 +80,10 @@ impl State {
             else {
                 return Err(Error::DuplicateGraph(graph_blob.file_id.into()));
             };
-            entry.insert(LoadState::Unloaded(graph_blob.blob));
+            entry.insert(LoadState::Unloaded(Blob {
+                uncompressed_len: graph_blob.uncompressed_blob_len,
+                data: graph_blob.blob,
+            }));
         }
 
         let mut indexed_node_path_blobs = HashMap::new();
@@ -93,7 +99,10 @@ impl State {
             else {
                 unreachable!()
             };
-            blobs.push(node_path_blob.blob);
+            blobs.push(Blob {
+                uncompressed_len: node_path_blob.uncompressed_blob_len,
+                data: node_path_blob.blob,
+            });
         }
 
         let mut indexed_root_path_blobs = HashMap::new();
@@ -108,7 +117,13 @@ impl State {
             else {
                 unreachable!()
             };
-            files_blobs.push((root_path_blob.file_id, root_path_blob.blob));
+            files_blobs.push((
+                root_path_blob.file_id,
+                Blob {
+                    uncompressed_len: root_path_blob.uncompressed_blob_len,
+                    data: root_path_blob.blob,
+                },
+            ));
         }
 
         Ok(Self {
@@ -122,7 +137,10 @@ impl State {
         })
     }
 
-    pub(super) fn load_nodes<'s>(&'s mut self, source_pos: &'s SourcePos) -> Result<impl Iterator<Item = Handle<Node>> + 's> {
+    pub(super) fn load_nodes<'s>(
+        &'s mut self,
+        source_pos: &'s SourcePos,
+    ) -> Result<impl Iterator<Item = Handle<Node>> + 's> {
         let file = Self::load_graph_for_file_inner(
             &source_pos.file_id,
             &mut self.graph,
@@ -442,20 +460,20 @@ pub(super) fn node_byte_range(
     }
 }
 
-fn decompress_if_needed(bytes: &[u8]) -> Cow<'_, [u8]> {
+fn decompress_if_needed(blob: &Blob) -> Cow<'_, [u8]> {
     // Check Zstd’s magic number
-    if bytes.len() < 4 || bytes[..4] != [0x28, 0xb5, 0x2f, 0xfd] {
-        return bytes.into();
+    if blob.data.len() < 4 || blob.data[..4] != [0x28, 0xb5, 0x2f, 0xfd] {
+        return blob.data.as_ref().into();
     }
 
     // TODO: What is a reasonable `capacity`?
     // TODO: Maybe we should store the exact uncompressed size along with the blob in the DB?
-    if let Ok(mut decompressed_bytes) = zstd::bulk::decompress(bytes, u16::MAX as _) {
+    if let Ok(mut decompressed_bytes) = zstd::bulk::decompress(&blob.data, blob.uncompressed_len) {
         decompressed_bytes.shrink_to_fit();
         decompressed_bytes.into()
     } else {
         // Could not decompress, so just return the original bytes and let
         // decoding fail downstream
-        bytes.into()
+        blob.data.as_ref().into()
     }
 }

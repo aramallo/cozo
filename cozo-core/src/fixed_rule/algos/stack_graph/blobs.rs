@@ -4,31 +4,37 @@ use super::error::{Error, TupleError};
 
 pub struct GraphBlob {
     pub file_id: Box<str>,
+    pub uncompressed_blob_len: usize,
     pub blob: Box<[u8]>,
 }
 
 pub struct NodePathBlob {
     pub file_id: Box<str>,
     pub start_node_local_id: u32,
+    pub uncompressed_blob_len: usize,
     pub blob: Box<[u8]>,
 }
 
 pub struct RootPathBlob {
     pub file_id: Box<str>,
     pub precondition_symbol_stack: Box<str>,
+    pub uncompressed_blob_len: usize,
     pub blob: Box<[u8]>,
 }
 
 impl TryFrom<Tuple> for GraphBlob {
     type Error = Error;
     fn try_from(tuple: Tuple) -> Result<Self, Self::Error> {
-        tuple.check_len(2)?;
+        tuple.check_len(3)?;
 
         let file_id = tuple.get_elem(0, DataValue::get_str, "string", None)?;
-        let blob = tuple.get_elem(1, DataValue::get_bytes, "bytes", None)?;
+        let uncompressed_blob_len =
+            tuple.get_elem(1, DataValue::get_non_neg_int, "unsigned integer", None)?;
+        let blob = tuple.get_elem(2, DataValue::get_bytes, "bytes", None)?;
 
         Ok(Self {
             file_id: file_id.into(),
+            uncompressed_blob_len: uncompressed_blob_len as _,
             blob: blob.into(),
         })
     }
@@ -37,7 +43,7 @@ impl TryFrom<Tuple> for GraphBlob {
 impl TryFrom<Tuple> for NodePathBlob {
     type Error = Error;
     fn try_from(tuple: Tuple) -> Result<Self, Self::Error> {
-        tuple.check_len(3)?;
+        tuple.check_len(4)?;
 
         let file_id = tuple.get_elem(0, DataValue::get_str, "string", None)?;
         let start_node_local_id =
@@ -45,12 +51,15 @@ impl TryFrom<Tuple> for NodePathBlob {
         let start_node_local_id = start_node_local_id.try_into().map_err(|_| {
             TupleError::elem_type(1, "32-bit integer", Some("bigger integer"), &tuple)
         })?;
-        let blob = tuple.get_elem(2, DataValue::get_bytes, "bytes", None)?;
+        let uncompressed_blob_len =
+            tuple.get_elem(2, DataValue::get_non_neg_int, "unsigned integer", None)?;
+        let blob = tuple.get_elem(3, DataValue::get_bytes, "bytes", None)?;
 
         // TODO: replace unwrap and handle error
         Ok(Self {
             file_id: file_id.into(),
             start_node_local_id,
+            uncompressed_blob_len: uncompressed_blob_len as _,
             blob: blob.into(),
         })
     }
@@ -59,16 +68,19 @@ impl TryFrom<Tuple> for NodePathBlob {
 impl TryFrom<Tuple> for RootPathBlob {
     type Error = Error;
     fn try_from(tuple: Tuple) -> Result<Self, Self::Error> {
-        tuple.check_len(3)?;
+        tuple.check_len(4)?;
 
         let file_id = tuple.get_elem(0, DataValue::get_str, "string", None)?;
         let precondition_symbol_stack = tuple.get_elem(1, DataValue::get_str, "string", None)?;
-        let blob = tuple.get_elem(2, DataValue::get_bytes, "bytes", None)?;
+        let uncompressed_blob_len =
+            tuple.get_elem(2, DataValue::get_non_neg_int, "unsigned integer", None)?;
+        let blob = tuple.get_elem(3, DataValue::get_bytes, "bytes", None)?;
 
         // TODO: replace unwrap and handle error
         Ok(Self {
             file_id: file_id.into(),
             precondition_symbol_stack: precondition_symbol_stack.into(),
+            uncompressed_blob_len: uncompressed_blob_len as _,
             blob: blob.into(),
         })
     }
