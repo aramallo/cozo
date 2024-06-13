@@ -1,13 +1,13 @@
+use log::debug;
 use stack_graphs::{
     stitching::{ForwardCandidates as _, ForwardPartialPathStitcher, StitcherConfig},
     CancellationFlag,
 };
 
-use crate::fixed_rule::stack_graph::state::node_byte_range;
-
 use super::{
     error::Result,
-    state::State,
+    pluralize,
+    state::{node_byte_range, State},
     Error, SourcePos,
 };
 
@@ -29,12 +29,15 @@ impl<'state> Querier<'state> {
         source_pos: &SourcePos,
         cancellation_flag: &dyn CancellationFlag,
     ) -> Result<Vec<SourcePos>> {
-        let nodes = self
-            .db
-            .load_nodes(source_pos)?
-            .collect::<Vec<_>>();
+        debug!("Finding definitions for source position \"{source_pos}\"...");
 
-        if nodes.is_empty() { return Err(Error::Query(source_pos.clone())) }
+        let nodes = self.db.load_nodes(source_pos)?.collect::<Vec<_>>();
+
+        if nodes.is_empty() {
+            return Err(Error::Query(source_pos.clone()));
+        }
+
+        debug!(" ↳ Found {}", pluralize(nodes.len(), "reference"));
 
         let mut all_paths = vec![];
         let config = StitcherConfig::default()
@@ -50,6 +53,8 @@ impl<'state> Querier<'state> {
             |_g, _ps, path| all_paths.push(path.clone()),
         )?;
 
+        debug!(" ↳ Found {}", pluralize(all_paths.len(), "total path"));
+
         let (graph, partials, _) = self.db.get_graph_partials_and_db();
         let mut actual_paths = vec![];
         for path in &all_paths {
@@ -62,6 +67,8 @@ impl<'state> Querier<'state> {
                 actual_paths.push(path.clone());
             }
         }
+
+        debug!(" ↳ Found {}", pluralize(actual_paths.len(), "actual path"));
 
         Ok(actual_paths
             .into_iter()

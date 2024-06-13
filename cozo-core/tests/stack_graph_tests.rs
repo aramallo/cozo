@@ -1,8 +1,11 @@
 #![cfg(feature = "graph-algo")]
 
-use cozo::{DataValue, DbInstance, NamedRows, ScriptMutability};
-use pretty_assertions::assert_eq;
 use std::collections::BTreeMap;
+
+use env_logger::{Builder as LoggerBuilder, Env as LogEnv};
+use pretty_assertions::assert_eq;
+
+use cozo::{DataValue, DbInstance, NamedRows, ScriptMutability};
 
 fn apply_db_schema(db: &mut DbInstance) {
     let schema = include_str!("stack_graphs/schema.pl");
@@ -118,8 +121,20 @@ fn import_root_paths_data(db: &mut DbInstance, rows: Vec<Vec<DataValue>>) {
     .unwrap();
 }
 
+fn init_logging() {
+    use std::sync::Once;
+    static ONCE: Once = Once::new();
+    ONCE.call_once(|| {
+        // Overridde with env. var. `RUST_LOG` with target `cozo::fixed_rule::algos::stack_graph`
+        // For example: `RUST_LOG=cozo::fixed_rule::algos::stack_graph=debug cargo test ...`
+        LoggerBuilder::from_env(LogEnv::default().default_filter_or("info")).init();
+    });
+}
+
 #[test]
 fn it_finds_definition_in_single_file() {
+    init_logging();
+
     // Initialize the DB
     let mut db = DbInstance::default();
     apply_db_schema(&mut db);
@@ -162,7 +177,7 @@ fn it_finds_definition_in_single_file() {
     root_paths[file, symbol_stack, uncompressed_value_len, value] :=
         *sg_root_paths[file, symbol_stack, _, uncompressed_value_len, value]
 
-    ?[urn] <~ StackGraph(graphs[], node_paths[], root_paths[], reference_urn: 'simple.py:13:14')
+    ?[urn] <~ StackGraph(graphs[], node_paths[], root_paths[], reference: 'simple.py:13:14')
     "#;
     let query_result = db.run_default(query).unwrap();
 
@@ -172,6 +187,8 @@ fn it_finds_definition_in_single_file() {
 
 #[test]
 fn it_finds_definition_across_multiple_files() {
+    init_logging();
+
     // Initialize the DB
     let mut db = DbInstance::default();
     apply_db_schema(&mut db);
@@ -222,7 +239,7 @@ fn it_finds_definition_across_multiple_files() {
     root_paths[file, symbol_stack, uncompressed_value_len, value] :=
         *sg_root_paths[file, symbol_stack, _, uncompressed_value_len, value]
 
-    ?[urn] <~ StackGraph(graphs[], node_paths[], root_paths[], reference_urn: 'main.py:22:25')
+    ?[urn] <~ StackGraph(graphs[], node_paths[], root_paths[], reference: 'main.py:22:25')
     "#;
     let query_result = db.run_default(query).unwrap();
 
@@ -232,6 +249,8 @@ fn it_finds_definition_across_multiple_files() {
 
 #[test]
 fn it_returns_empty_without_errors_if_definition_is_not_available() {
+    init_logging();
+
     // Initialize the DB
     let mut db = DbInstance::default();
     apply_db_schema(&mut db);
@@ -275,7 +294,7 @@ fn it_returns_empty_without_errors_if_definition_is_not_available() {
     root_paths[file, symbol_stack, uncompressed_value_len, value] :=
         *sg_root_paths[file, symbol_stack, _, uncompressed_value_len, value]
 
-    ?[urn] <~ StackGraph(graphs[], node_paths[], root_paths[], reference_urn: 'main.py:22:25')
+    ?[urn] <~ StackGraph(graphs[], node_paths[], root_paths[], reference: 'main.py:22:25')
     "#;
     let query_result = db.run_default(query).unwrap();
 

@@ -5,6 +5,7 @@ use std::{
 };
 
 use itertools::Itertools as _;
+use log::debug;
 use stack_graphs::{
     arena::Handle,
     graph::{Degree, File, Node, StackGraph},
@@ -17,7 +18,7 @@ use stack_graphs::{
 use super::{
     blobs::{Blob, GraphBlob, NodePathBlob, RootPathBlob},
     error::Result,
-    Error, SourcePos,
+    pluralize, Error, SourcePos,
 };
 
 /// Optionally Zstd-compressed (see [`decompress_if_needed`]).
@@ -69,6 +70,8 @@ impl State {
     ) -> Result<Self> {
         let graph = StackGraph::new();
 
+        debug!("Indexing state...");
+
         let mut indexed_graph_blobs = HashMap::new();
         for graph_blob in graph_blobs {
             let graph_blob = graph_blob?;
@@ -79,6 +82,12 @@ impl State {
             entry.insert(LoadState::Unloaded(graph_blob.blob));
         }
 
+        debug!(
+            " ↳ Indexed {}...",
+            pluralize(indexed_graph_blobs.len(), "file graph")
+        );
+
+        let mut count = 0;
         let mut indexed_node_path_blobs = HashMap::new();
         for node_path_blob in node_path_blobs {
             let node_path_blob = node_path_blob?;
@@ -93,8 +102,16 @@ impl State {
                 unreachable!()
             };
             blobs.push(node_path_blob.blob);
+            count += 1;
         }
 
+        debug!(
+            " ↳ Indexed {} from {}...",
+            pluralize(count, "node path"),
+            pluralize(indexed_node_path_blobs.len(), "node")
+        );
+
+        let mut count = 0;
         let mut indexed_root_path_blobs = HashMap::new();
         for root_path_blob in root_path_blobs {
             let root_path_blob = root_path_blob?;
@@ -108,7 +125,14 @@ impl State {
                 unreachable!()
             };
             files_blobs.push((root_path_blob.file_id, root_path_blob.blob));
+            count += 1;
         }
+
+        debug!(
+            " ↳ Indexed {} from {}...",
+            pluralize(count, "root path"),
+            pluralize(indexed_root_path_blobs.len(), "symbol stack")
+        );
 
         Ok(Self {
             graph_blobs: indexed_graph_blobs,
@@ -184,7 +208,7 @@ impl State {
     ) -> Result<Handle<File>> {
         let file_id: &str = file_id.as_ref();
 
-        // copious_debugging!("--> Load graph for {}", file);
+        debug!("Load graph for {}", file_id);
 
         macro_rules! err_what {
             ($prefix:literal, $file_id:ident) => {
@@ -193,7 +217,7 @@ impl State {
         }
 
         let Some(blob) = graph_blobs.get_mut(file_id) else {
-            // copious_debugging!("   > Already loaded");
+            debug!(" ↳ Failed to load graph");
             return Err(Error::MissingData(err_what!("data for ", file_id)));
         };
 
@@ -204,21 +228,24 @@ impl State {
         }
 
         let Some(blob) = blob.load() else {
-            // copious_debugging!(" * Already loaded");
+            debug!(" ↳ Already loaded graph");
             stats.file_cached += 1;
             return file_handle(graph, file_id);
         };
 
-        let blob = decompress_if_needed(&blob);
-
-        // copious_debugging!(" * Load from database");
         stats.file_loads += 1;
+        debug!(" ↳ Found graph; decompressing, deserializing, & inserting");
+
+        let blob = decompress_if_needed(&blob);
         let (file_graph, _): (sg_serde::StackGraph, _) =
             bincode::decode_from_slice(&blob, BINCODE_CONFIG)
                 .map_err(|e| Error::decode(err_what!("graph in ", file_id), e))?;
         file_graph
             .load_into(graph)
             .map_err(|e| Error::load(err_what!("graph in ", file_id), e))?;
+
+        debug!(" ↳ Loaded graph");
+
         file_handle(graph, file_id)
     }
 
@@ -230,7 +257,10 @@ impl State {
         // Adapted from:
         // https://github.com/github/stack-graphs/blob/2c97ba2/stack-graphs/src/storage.rs#L580
 
-        // copious_debugging!(" * Load extensions from node {}", node.display(&self.graph));
+        debug!(
+            "Load node path extensions from node {}",
+            node.display(&self.graph)
+        );
         let id = self.graph[node].id();
         let Some(file_id) = id.file().map(|f| self.graph[f].name()) else {
             return Ok(());
@@ -238,20 +268,23 @@ impl State {
 
         let blob_key = (Box::from(file_id), id.local_id());
         let Some(blobs_load_state) = self.node_path_blobs.get_mut(&blob_key) else {
-            // Not all nodes will have paths starting from them
+            debug!(" ↳ No node path extensions found");
             return Ok(());
         };
 
         let Some(blobs) = blobs_load_state.load() else {
-            eprintln!("No file paths for key {blob_key:?}");
+            debug!(" ↳ Already loaded node path extensions");
             self.stats.node_path_cached += 1;
             return Ok(());
         };
 
         self.stats.node_path_loads += 1;
+        debug!(
+            " ↳ Found {}; decompressing, deserializing, & inserting...",
+            pluralize(blobs.len(), "node path extension"),
+        );
 
-        // #[cfg_attr(not(feature = "copious-debugging"), allow(unused))]
-        // let mut count = 0usize;
+        let mut count = 0usize;
 
         let err_what = || {
             format!(
@@ -271,16 +304,18 @@ impl State {
                 .to_partial_path(&mut self.graph, &mut self.partials)
                 .map_err(|e| Error::load(err_what(), e))?;
 
-            // copious_debugging!(
-            //     "   > Loaded {}",
-            //     path.display(&self.graph, &mut self.partials)
-            // );
-            // count += 1;
+            count += 1;
+            debug!(
+                " ↳ → Loaded node path extension {}",
+                path.display(&self.graph, &mut self.partials)
+            );
 
             self.db
                 .add_partial_path(&self.graph, &mut self.partials, path);
         }
-        // copious_debugging!("   > Loaded {}", count);
+
+        debug!(" ↳ Loaded {}", pluralize(count, "node path extension"),);
+
         Ok(())
     }
 
@@ -294,27 +329,32 @@ impl State {
         let (symbol_stack_patterns, _) = PartialSymbolStackExt(symbol_stack)
             .storage_key_patterns(&self.graph, &mut self.partials);
         for symbol_stack in symbol_stack_patterns {
-            // copious_debugging!(
-            //     " * Load extensions from root with prefix symbol stack {}",
-            //     symbol_stack
-            // );
+            debug!(
+                "Load root path extensions from root with prefix symbol stack \"{}\"",
+                symbol_stack
+            );
 
             let Some(blobs_load_state) =
                 self.root_path_blobs.get_mut(symbol_stack.as_ref() as &str)
             else {
+                debug!(" ↳ No root path extensions found");
                 // Not all symbol stack patterns will have results
                 continue;
             };
 
             let Some(blobs) = blobs_load_state.load() else {
-                // copious_debugging!("   > Already loaded");
+                debug!(" ↳ Already loaded root path extensions");
                 self.stats.root_path_cached += 1;
                 continue;
             };
-            self.stats.root_path_loads += 1;
 
-            // #[cfg_attr(not(feature = "copious-debugging"), allow(unused))]
-            // let mut count = 0usize;
+            self.stats.root_path_loads += 1;
+            debug!(
+                " ↳ Found {}; decompressing, deserializing, & inserting...",
+                pluralize(blobs.len(), "root path extension"),
+            );
+
+            let mut count = 0usize;
 
             let err_what = || format!("root path with symbol stack {:?}", symbol_stack);
 
@@ -335,17 +375,17 @@ impl State {
                     .to_partial_path(&mut self.graph, &mut self.partials)
                     .map_err(|e| Error::load(err_what(), e))?;
 
-                // copious_debugging!(
-                //     "   > Loaded {}",
-                //     path.display(&self.graph, &mut self.partials)
-                // );
-                // count += 1;
+                count += 1;
+                debug!(
+                    " ↳ → Loaded {}",
+                    path.display(&self.graph, &mut self.partials)
+                );
 
                 self.db
                     .add_partial_path(&self.graph, &mut self.partials, path);
             }
 
-            // copious_debugging!("   > Loaded {}", count);
+            debug!(" ↳ Loaded {}", pluralize(count, "root path extension"),);
         }
         Ok(())
     }
