@@ -1,0 +1,32 @@
+{
+  "graph": {
+    "file": "b.py",
+    "binary_data": "KLUv/WAAEwUgAEZhbCfQkMwDenF6to6zx00StHiAL17ItiCNZFgsG6fzM3P6XfXlSsQ9SQJgAGAAYAB4wzTdyQc+WXw4v/X22cxAkaJS7j5OaySKkj5jLsoa96vRHEYElSQohPTcp+lOkjhuzx38ooJlaPrtoPe0hmP7+3Yxr+lsET2XXbyvBrbhXToQPg8YYYQxQoGHDg+TAcT9Yvuz7juM88tpMJruLCyWTlBTTqyNJJCEu5nmNgLV2gqecefwl1FIIgGVWtTOzvEZAqk0Q+3sWsO21x6IiQ9lbS3fvakIbEmtAKzn39ejQFVVJcD2u1bVuWhVt9ew5wKv4UvEcRytN4fSP69/WsrrAiHUyTcZaxln2Mbng/55GU/yBnN+LxWtBhHURCRnz999v51jWWPOf3scH0FdUURxBVABZHneX/+NafK3IRBk7PQ+TpHQxj1HoHJgysgESPbWpNJC1UqpWDoZbKXzwTCtlanmRVUzmrARSWUjE4RYU7UQW60J+jwy1kpiFUF7VRvFCB8RFlwWSF6mlA4Ta/M9W2DDJSFombIyYdDagDVRaGFHqolKhQs10YEEaqJzP95wzwGBQahhWVUiIklBCippDOEFhBCipLxtEsCBRA5TIGMgUoYYY5ghkZE4EZkwbYsBNJ+EvHdNm4aShqAg3qb5lZTDrjpe9H7775JwJLkbIEX+OF/wGOXTBl5xx6uauccNO19RTFprdA6sBWBkrLAbRY5nx+BQZU4QSYkM5gS93Uj7V0R+cC4DzTZ7irDMa3eDzN+HN5pRSvwx1M10HjDqo0ks151Xw4i4GPT5xXMZdv/ci5oPJjdzMspY44B5AG4+cQHteSql+/K8ZdSW0sv+xGOPpnyOgnjoZ02G42zwXJwGDIq1QVqqGtBPzIArW3CtGEebCOIve6lyqpZOQCbu4sGv9VJKm3zOIgqWGogO5fQmj9gQhHT1GzngIoF/CiUbqovO9XUYypx8rDcUcXC5qgoyFu+4E58LXwQ815FzkwNVFlcFcwKU68JGzNVSTUrGe1SSidLxuiUTAiQlybNU0p+u7CnwikHewdWiIF/wxbOjhNW9kaTSUyTh3v19LARV48fxabxh23YO8NuD6JP65W5MmyqSsjzAnp8g6fKXdZMbmVpVAqkQFChSbsoZW06P+yOLlKj/x/AwF6CP8dNWCsOIhyjIhl2dwJ77GEs8lhCN6qaIVL6YfGj7lnCzPP0CieSpszxbqVIUEjrbN1Rh3kITx6UgA8V1HJFLY+kongqGSq/d2DiGG63Ri5dRU0au9CQscmKamPoYrBsk5MBwnylHCR6NBQBGUBDxQmXoTMfgAVwdiOfaRJ/aLEmhnt5r8BHgVwDsDD62NkdbYAo=",
+    "uncompressed_len": 5120
+  },
+  "node_paths": [
+    {
+      "file": "b.py",
+      "start_node_local_id": 2,
+      "discriminant": 0,
+      "uncompressed_len": 86,
+      "binary_data": "KLUv/SBWnQEA+AEEYi5weQIaAwFiAAEuAANmb28AAQEGAgAHCAAREgIIACALyAcyA1msDBRqsLpSNZQt"
+    },
+    {
+      "file": "b.py",
+      "start_node_local_id": 2,
+      "discriminant": 1,
+      "uncompressed_len": 115,
+      "binary_data": "KLUv/SBzFQIAhAIBBGIucHkCAAECAWIAAS4AAQECCjxidWlsdGlucz4JBwgAERIBCgkACwAgC8gHMgNZQD6QGUhZaeCUPt0I1jCd"
+    }
+  ],
+  "root_paths": [
+    {
+      "file": "b.py",
+      "symbol_stack": "V␞b",
+      "discriminant": 0,
+      "uncompressed_len": 28,
+      "binary_data": "AAEBBGIucHkCAQFiAAEBAAEBAAEBAAEBAQABAA=="
+    }
+  ]
+}
