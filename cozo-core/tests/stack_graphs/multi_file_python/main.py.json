@@ -1,0 +1,74 @@
+{
+  "graph": {
+    "file": "main.py",
+    "binary_data": "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",
+    "uncompressed_len": 10270
+  },
+  "node_paths": [
+    {
+      "file": "main.py",
+      "start_node_local_id": 28,
+      "discriminant": 0,
+      "uncompressed_len": 50,
+      "binary_data": "KLUv/SAyLQEA0AEHbWFpbi5weRwAAQABAQEBYQABAAEBAhQAAwAuBPjJBK3CBA=="
+    },
+    {
+      "file": "main.py",
+      "start_node_local_id": 51,
+      "discriminant": 1,
+      "uncompressed_len": 63,
+      "binary_data": "KLUv/SA/XQEA8AEHbWFpbi5weTM7AQEwAAEBAQNmb28AAQECMwA0AAQALgWFKqxu1BalCw=="
+    },
+    {
+      "file": "main.py",
+      "start_node_local_id": 49,
+      "discriminant": 2,
+      "uncompressed_len": 124,
+      "binary_data": "KLUv/SB8PQIAJAMBB21haW4ucHkxAAEAAQEDCjxidWlsdGlucz4AAS4ABXByaW50AAEAAQEHJxESAQoJAAgAYAvYBzYDW8A+FyJIxeRvzSc="
+    },
+    {
+      "file": "main.py",
+      "start_node_local_id": 59,
+      "discriminant": 3,
+      "uncompressed_len": 122,
+      "binary_data": "KLUv/SB6LQIABAMBB21haW4ucHk7AAEAAQEDCjxidWlsdGlucz4AAS4AA2ZvbwABAAEBBycREgEKCQAIAGAL2Ac2A1vAPhciQMWkbc0n"
+    },
+    {
+      "file": "main.py",
+      "start_node_local_id": 49,
+      "discriminant": 4,
+      "uncompressed_len": 145,
+      "binary_data": "KLUv/SCRPQIAxAIBB21haW4ucHkxHAABAQMBYQABLgAFcHJpbnQAAQEJMQAnEQIiACQlIyEWAAsAYAvYBzYDW4CCQUGwmUtpRxVBN1iLggQ="
+    },
+    {
+      "file": "main.py",
+      "start_node_local_id": 59,
+      "discriminant": 5,
+      "uncompressed_len": 143,
+      "binary_data": "KLUv/SCPLQIApAIBB21haW4ucHk7HAABAQMBYQABLgADZm9vAAEBCTsAJxECIgAkJSMhFgALAGAL2Ac2A1uAgkFBsJlLaUUVQTdCi9IF"
+    },
+    {
+      "file": "main.py",
+      "start_node_local_id": 2,
+      "discriminant": 6,
+      "uncompressed_len": 170,
+      "binary_data": "KLUv/SCqZQIAxAIBB21haW4ucHkCAAECBAABLgABAQIKPGJ1aWx0aW5zPgsHCAAmJxESAQoJAA4AYAvYBzYDW8A+sBnYAvaBzS6EUcVZN6yaEz4oSg=="
+    },
+    {
+      "file": "main.py",
+      "start_node_local_id": 2,
+      "discriminant": 7,
+      "uncompressed_len": 191,
+      "binary_data": "KLUv/SC/dQIAhAIBB21haW4ucHkCHAIEAAEuAAEBAgFhDQIABwgAJicRAiIAJCUjIRYAEQBgC9gHNgNbgIJBQbAZ2AL2gc3AFi4FkyqsG5ZlDgijRUEC"
+    }
+  ],
+  "root_paths": [
+    {
+      "file": "main.py",
+      "symbol_stack": "V␞main",
+      "discriminant": 0,
+      "uncompressed_len": 34,
+      "binary_data": "AAEBB21haW4ucHkCAQRtYWluAAEBAAEBAAEBAAEBAQABAA=="
+    }
+  ]
+}
