@@ -65,6 +65,20 @@ fn import_root_paths_data(db: &mut DbInstance, rows: Vec<Vec<DataValue>>) {
     .unwrap();
 }
 
+fn import_stack_graph_blobs(db: &mut DbInstance, json: &[u8]) {
+    let blobs: serialization::Blobs =
+        serde_json::from_reader(json).expect("cannot deserialize blobs from JSON");
+    import_graphs_data(db, vec![blobs.graph.into()]);
+    import_node_paths_data(db, blobs.node_paths.into_iter().map(From::from).collect());
+    import_root_paths_data(db, blobs.root_paths.into_iter().map(From::from).collect());
+}
+
+macro_rules! include_json_bytes {
+    ( $path:literal ) => {
+        include_bytes!(concat!("stack_graphs/", $path, ".json"))
+    };
+}
+
 fn init_logging() {
     use std::sync::Once;
     static ONCE: Once = Once::new();
@@ -73,18 +87,6 @@ fn init_logging() {
         // For example: `RUST_LOG=cozo::fixed_rule::algos::stack_graph=debug cargo test ...`
         LoggerBuilder::from_env(LogEnv::default().default_filter_or("info")).init();
     });
-}
-
-fn import_stack_graph_blobs(db: &mut DbInstance, file_path: &str) {
-    let json_path = format!("tests/stack_graphs/{file_path}.json");
-    let file = std::fs::File::open(json_path).expect("missing blobs JSON file");
-    let reader = std::io::BufReader::new(file);
-    let blobs: serialization::Blobs =
-        serde_json::from_reader(reader).expect("cannot deserialize blobs from JSON");
-    // Populate the DB
-    import_graphs_data(db, vec![blobs.graph.into()]);
-    import_node_paths_data(db, blobs.node_paths.into_iter().map(From::from).collect());
-    import_root_paths_data(db, blobs.root_paths.into_iter().map(From::from).collect());
 }
 
 #[test]
@@ -96,18 +98,16 @@ fn it_finds_definition_in_single_file() {
     apply_db_schema(&mut db);
 
     // Populate the DB
-    import_stack_graph_blobs(&mut db, "single_file_python/simple.py");
+    import_stack_graph_blobs(&mut db, include_json_bytes!("single_file_python/simple.py"));
 
     // Perform a stack graph query
     let query = r#"
-    graphs[file, uncompressed_value_len, value] :=
-        *sg_graphs[file, uncompressed_value_len, value]
     node_paths[file, start_local_id, uncompressed_value_len, value] :=
         *sg_node_paths[file, start_local_id, _, uncompressed_value_len, value]
     root_paths[file, symbol_stack, uncompressed_value_len, value] :=
         *sg_root_paths[file, symbol_stack, _, uncompressed_value_len, value]
 
-    ?[urn] <~ StackGraph(graphs[], node_paths[], root_paths[], references: ['simple.py:13:14'])
+    ?[] <~ StackGraph(*sg_graphs[], node_paths[], root_paths[], references: ['simple.py:13:14'])
     "#;
     let query_result = db.run_default(query).unwrap();
 
@@ -126,20 +126,18 @@ fn it_finds_definition_across_multiple_files() {
     apply_db_schema(&mut db);
 
     // Populate the DB
-    import_stack_graph_blobs(&mut db, "multi_file_python/main.py");
-    import_stack_graph_blobs(&mut db, "multi_file_python/a.py");
-    import_stack_graph_blobs(&mut db, "multi_file_python/b.py");
+    import_stack_graph_blobs(&mut db, include_json_bytes!("multi_file_python/main.py"));
+    import_stack_graph_blobs(&mut db, include_json_bytes!("multi_file_python/a.py"));
+    import_stack_graph_blobs(&mut db, include_json_bytes!("multi_file_python/b.py"));
 
     // Perform a stack graph query
     let query = r#"
-    graphs[file, uncompressed_value_len, value] :=
-        *sg_graphs[file, uncompressed_value_len, value]
     node_paths[file, start_local_id, uncompressed_value_len, value] :=
         *sg_node_paths[file, start_local_id, _, uncompressed_value_len, value]
     root_paths[file, symbol_stack, uncompressed_value_len, value] :=
         *sg_root_paths[file, symbol_stack, _, uncompressed_value_len, value]
 
-    ?[urn] <~ StackGraph(graphs[], node_paths[], root_paths[], references: ['main.py:22:25'])
+    ?[] <~ StackGraph(*sg_graphs[], node_paths[], root_paths[], references: ['main.py:22:25'])
     "#;
     let query_result = db.run_default(query).unwrap();
 
@@ -158,18 +156,16 @@ fn it_returns_empty_without_errors_if_definition_is_not_available() {
     apply_db_schema(&mut db);
 
     // Populate the DB
-    import_stack_graph_blobs(&mut db, "multi_file_python/main.py");
+    import_stack_graph_blobs(&mut db, include_json_bytes!("multi_file_python/main.py"));
 
     // Perform a stack graph query
     let query = r#"
-    graphs[file, uncompressed_value_len, value] :=
-        *sg_graphs[file, uncompressed_value_len, value]
     node_paths[file, start_local_id, uncompressed_value_len, value] :=
         *sg_node_paths[file, start_local_id, _, uncompressed_value_len, value]
     root_paths[file, symbol_stack, uncompressed_value_len, value] :=
         *sg_root_paths[file, symbol_stack, _, uncompressed_value_len, value]
 
-    ?[urn] <~ StackGraph(graphs[], node_paths[], root_paths[], references: ['main.py:22:25'])
+    ?[] <~ StackGraph(*sg_graphs[], node_paths[], root_paths[], references: ['main.py:22:25'])
     "#;
     let query_result = db.run_default(query).unwrap();
 
