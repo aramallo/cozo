@@ -1,39 +1,31 @@
 {
+  "file": "a.py",
   "graph": {
-    "file": "a.py",
-    "binary_data": "KLUv/WChFnUjAGakdiXQkuwqM8klmGUTyF344gG+9KuhABDEzoa9u+6qpDKZkq5UT42QagBrAGkAHiCrF9XpfLW3u5v7NwkiAZYRAGtq3zu9RVRyVFTpolJI2gtz/yQJBH8eAm4w3A7u44/qTufA6/Xv8EbnzjUg7W14e+xRVYl/odc5qaokzbcH8b4/5rp3OeCfADFSIlFGGaWME4qQzgYHyP7yvj/Hw+5gWkpgKWt2Qgy1tVpR52nwYABhTtb8H1+vt09/FwSxx21y/zQyVqsErIUsFg9v3eNMKAtlgHx/b4cbhuWRfBDNK9is/J5vpzOFqla1UdxISpU59hwGOqmYl9zPtccdzHVRM4AKUcpNZqypDkyGTuenmrze3f5c5/1AF7If9qlAgRy+M9/b/dA8mglXpX7Y4VsAoaoTVaOHYrRao+eAZrVGl3p9mN+s/+9ZogYWNJqTNqPP9ac//uD9uu/u973zbYsqg+aEKq9gFoDch18HGCah0TTNRIWQuDJrIkKrIgaiumSqDMZO1gWzroiqkYisuiJIs4/lso+1sYJNlsIoEctai7QXFG1GWUjKGJHx4jWaZyLS0Cph1Zs95rK3PzTQjMiyqgMMOxWLjYSYmYTNiD5QgcsBo77BX5PJRCKRBIFuqHFRVSIikoIUpJDG8QWEEIOos3kSoHE8z2IkgjDDkIAYwhQyMiIigQQiErTVAYLKvmnl1FjG2GuKaJtoLnzt1iCAMWot/8IjTvfS3THGHn7s49MQlglhJvBYhqdDw+dUjfiAzSXlwSXVAbeY7VKgHAOXErePevJlUSGnbao308Cb6ULjFuJTFY6fyxo83JmxiSOy977NfF5GAiF+Q8dir56wQwShGyg5o23LYFzudrf4X62J8COHRoIxVWKpbmRwyiAqsWT+b1dr3ep0Mb1499xu8eZkvfVS66vQGxdkXdethuzf++EkN+NefkACd3lQ3qvdNXV+sTA1UHKuRVP+bGBnw5mg54FvXu0leGl2c2+CbCEvXxycLDxNvNSGoQht/cbeVE2GKJl5ihNSxWDuOWalDdFb2cm6WT/U8sGMrONWEk9+enqwkX3Kh+thu35EcFP601w4nOBTLLaRbuQ4ARAAh9TTyhe9oMf5jnSWTBgBIp5h+qNV9B/nOX4fIVy1grlTM5Jd0KkxIuRu3tLQZCpfMX3wFNnoaUAL2IugsMjmOCZgRHoyrRTlxgK8h8lfgBxJmdpV7MSiazRjW3oeEUKoEKtcq3daeNJRAvgbPRXvruEdKGz07YU9PXPyyvQkp0S9j+Zba47eyrOgvv4+SQ+8iDGE0Ty7h9ThA99OG9WJhpGd8CJWr8u8YfqGmACGaqEHQtFfC+D7DVCi5FpDNCu0SgaFADjfytldwTciSKXlKcfISRjZRIcICKnf7LBfo48qRMMg+ml+ssbwUA0cIsR0VrycoOgNXVIUmRaA9O1+TloC8mU6A6MYiDV5ak5tSxe9ku9cMLYHEzr5AEJyjvZThVhDgeXzgmxUMGseGg==",
-    "uncompressed_len": 6049
+    "uncompressed_len": 6049,
+    "data": "KLUv/WChFvUiAPZjdifAUtkBKjNi8BIjEgj5WQRBEAQSOgAASQKm9N3rNK2Uiyi1aWuoFANqAGkAaQARrWLW2xpv8POw7uEceAayhESu7bu3uWlKq1I8HMHeUZZFbf6BEu/fz10Hd6d3Ivb7e1mDIW2Qy5/PHFNjolIVVYLa4Kh7SFEe+fMPMWNh687xRvdziDnip5HnmUAe+chHykci8dHRZAAZfPQGOuPFUg/cokEVOKCba9L/M/abC3eIRTGDnUb3EANzNytgcq9UqUCavRKYuQ5yJBci/z74jZxFJYK+x+YUW7N6p0mx9ap3+l1jb+vJ1MhJxJqaZ89ZoJKa+Qnhz7fPnQsGYDE7ve1pEgkEQY+UnMQIXBm64PfnfZ9v/WUia1Ongv1jnwkih3+afxzu2NxShD92+BeAVXuwsf6yUdE00GqdKGqpExZmjvX+v2uqYLPR6fMd7p+/iMPuPfx974QfBbU0SQIJqHUR3GsSuR//9rgLWQZRbVsVUR0gMO2KeNis5+JgWTAW5nI3lyW7sMlWyINmYZO03aiC3ejeh5Jtrs0mkOveiryY9Fx7JSkfiHwsVVRtVRRR0WlCXBVrnzsNfh3VJD1QbIhjh6JplqSRDlBmahTNZGbDxGcZBm/7CJMEgWKoUWFVIpKkIJVCBwGGhBgkoXEDEqBxTJbEOARhGWYMMoQpZWRCCSQQEYmqA8S78rGNRPcYWNOFoZfGT1MSR0CTMy37C1u0xXfcaZAeau92LZWcsORwOBTq5HiDkFjYBDQXMQ+e6RXdIrRLDxyaW+fQy/BRH9U+bapqTBgYtAMCizG9tckz+nFUXkbZmbtWomzlHpVyLjbkRcIT1pMk1wSSWWIQ6sdUN7rfwZb2Dz728jKOLJAh3I/9WwcrI8zX0w8+c04HEryr8GClDgBCZMh1qRc9z+FgG7fz4crlOn53IHTK3PJ+IbPMqsgPv3/ozXEtZdD4vyOfduUeEOF4DaNpWO07eP/YzReEObKnWOvGExDXpLExDVgE/f8LxZh9Xu6sw50XsaSYmDQzBbj/bky+1E8WjZl5oMXWDVnCRZOcV4bmrv9iZitLB8Xtn/yW0uvXY49i3bPrHFpqB8bgLdHqSHwkREsK9rY2Uj2SNNy/QGrEWrE5o8C37RRlPMcn7WcA6AGPKBWYnxP1jPmAjE1a60iwQacozbHehQy/LbfEDqk5vKDyOmCdEJXocXd6ZrODpBUNc9k4CMxf2wviSGrya50Madm5eVoWYM4i58sVZU6DyUpLDhcB23xbLmWNyC5B2T6CpQ6iiWjARTac1nMA0eZlEJKkBLCqJcthVGZQVPwO39QjLJFLKO8zRbMVCaSRRN57bYITX2/7lIdmJk93KD1JhumaYRklYmbYZW4fosxRQ2WxrMw9iR5F/Shqj4DPjjQL9DIAk59hoEFPHADdYELGyR3DsS0dMyNICAdBLvtYvl1CzxhTRRNtVWLNL8sTtwwVgKiAjWyfE3XyD84P"
   },
   "node_paths": [
     {
-      "file": "a.py",
       "start_node_local_id": 28,
-      "discriminant": 0,
       "uncompressed_len": 41,
-      "binary_data": "AQRhLnB5HAABAAEBAQFiAAEBAAEBAAEBAgEEYS5weRwAAQRhLnB5FAA="
+      "data": "AQRhLnB5HAABAAEBAQFiAAEBAAEBAAEBAgEEYS5weRwAAQRhLnB5FAA="
     },
     {
-      "file": "a.py",
       "start_node_local_id": 2,
-      "discriminant": 1,
       "uncompressed_len": 115,
-      "binary_data": "KLUv/SBzFQIAhAIBBGEucHkCAAECAWEAAS4AAQECCjxidWlsdGlucz4JBwgAERIBCgkACwAgC8gHMgNZQD6QGUhZaeCUPt0I1jCd"
+      "data": "KLUv/SBzFQIAhAIBBGEucHkCAAECAWEAAS4AAQECCjxidWlsdGlucz4JBwgAERIBCgkACwAgC8gHMgNZQD6QGUhZaeCUPt0I1jCd"
     },
     {
-      "file": "a.py",
       "start_node_local_id": 2,
-      "discriminant": 2,
       "uncompressed_len": 127,
-      "binary_data": "KLUv/SB/JQIARAIBBGEucHkCHAIBYQABLgABAQIBYgsCAAcIABECIgAkJSMhFgAOACALyAcyA1mAgcFAkBnIAvJdGTjUYN2wWMbXUIw="
+      "data": "KLUv/SB/JQIARAIBBGEucHkCHAIBYQABLgABAQIBYgsCAAcIABECIgAkJSMhFgAOACALyAcyA1mAgcFAkBnIAvJdGTjUYN2wWMbXUIw="
     }
   ],
   "root_paths": [
     {
-      "file": "a.py",
       "symbol_stack": "V␞a",
-      "discriminant": 0,
       "uncompressed_len": 28,
-      "binary_data": "AAEBBGEucHkCAQFhAAEBAAEBAAEBAAEBAQABAA=="
+      "data": "AAEBBGEucHkCAQFhAAEBAAEBAAEBAAEBAQABAA=="
     }
   ]
 }

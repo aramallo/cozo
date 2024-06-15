@@ -13,7 +13,7 @@ fn apply_db_schema(db: &mut DbInstance) {
         .expect("Could not create relations");
 }
 
-fn import_graphs_data(db: &mut DbInstance, rows: Vec<Vec<DataValue>>) {
+fn import_graph_data(db: &mut DbInstance, file: &str, row: serialization::Blob) {
     db.import_relations(BTreeMap::from([(
         "sg_graphs".to_string(),
         NamedRows {
@@ -22,14 +22,22 @@ fn import_graphs_data(db: &mut DbInstance, rows: Vec<Vec<DataValue>>) {
                 "uncompressed_value_len".to_string(),
                 "value".to_string(),
             ],
-            rows,
+            rows: vec![vec![
+                file.into(),
+                (row.uncompressed_len as i64).into(),
+                row.data.into_vec().into(),
+            ]],
             next: None,
         },
     )]))
     .unwrap()
 }
 
-fn import_node_paths_data(db: &mut DbInstance, rows: Vec<Vec<DataValue>>) {
+fn import_node_paths_data(
+    db: &mut DbInstance,
+    file: &str,
+    rows: impl IntoIterator<Item = serialization::NodePathBlob>,
+) {
     db.import_relations(BTreeMap::from([(
         "sg_node_paths".to_string(),
         NamedRows {
@@ -40,14 +48,30 @@ fn import_node_paths_data(db: &mut DbInstance, rows: Vec<Vec<DataValue>>) {
                 "uncompressed_value_len".to_string(),
                 "value".to_string(),
             ],
-            rows,
+            rows: rows
+                .into_iter()
+                .enumerate()
+                .map(|(i, row)| {
+                    vec![
+                        file.into(),
+                        (row.start_node_local_id as i64).into(),
+                        (i as i64).into(),
+                        (row.value.uncompressed_len as i64).into(),
+                        row.value.data.into_vec().into(),
+                    ]
+                })
+                .collect(),
             next: None,
         },
     )]))
     .unwrap();
 }
 
-fn import_root_paths_data(db: &mut DbInstance, rows: Vec<Vec<DataValue>>) {
+fn import_root_paths_data(
+    db: &mut DbInstance,
+    file: &str,
+    rows: impl IntoIterator<Item = serialization::RootPathBlob>,
+) {
     db.import_relations(BTreeMap::from([(
         "sg_root_paths".to_string(),
         NamedRows {
@@ -58,11 +82,38 @@ fn import_root_paths_data(db: &mut DbInstance, rows: Vec<Vec<DataValue>>) {
                 "uncompressed_value_len".to_string(),
                 "value".to_string(),
             ],
-            rows,
+            rows: rows
+                .into_iter()
+                .enumerate()
+                .map(|(i, row)| {
+                    vec![
+                        file.into(),
+                        row.symbol_stack.as_ref().into(),
+                        (i as i64).into(),
+                        (row.value.uncompressed_len as i64).into(),
+                        row.value.data.into_vec().into(),
+                    ]
+                })
+                .collect(),
             next: None,
         },
     )]))
     .unwrap();
+}
+
+fn import_stack_graph_blobs(db: &mut DbInstance, json: &[u8]) {
+    let blobs: serialization::Blobs =
+        serde_json::from_reader(json).expect("cannot deserialize blobs from JSON");
+    let file = blobs.file.as_ref();
+    import_graph_data(db, file, blobs.graph);
+    import_node_paths_data(db, file, blobs.node_paths);
+    import_root_paths_data(db, file, blobs.root_paths);
+}
+
+macro_rules! include_json_bytes {
+    ( $path:literal ) => {
+        include_bytes!(concat!("stack_graphs/", $path, ".json"))
+    };
 }
 
 fn init_logging() {
@@ -75,18 +126,6 @@ fn init_logging() {
     });
 }
 
-fn import_stack_graph_blobs(db: &mut DbInstance, file_path: &str) {
-    let json_path = format!("tests/stack_graphs/{file_path}.json");
-    let file = std::fs::File::open(json_path).expect("missing blobs JSON file");
-    let reader = std::io::BufReader::new(file);
-    let blobs: serialization::Blobs =
-        serde_json::from_reader(reader).expect("cannot deserialize blobs from JSON");
-    // Populate the DB
-    import_graphs_data(db, vec![blobs.graph.into()]);
-    import_node_paths_data(db, blobs.node_paths.into_iter().map(From::from).collect());
-    import_root_paths_data(db, blobs.root_paths.into_iter().map(From::from).collect());
-}
-
 #[test]
 fn it_finds_definition_in_single_file() {
     init_logging();
@@ -96,7 +135,7 @@ fn it_finds_definition_in_single_file() {
     apply_db_schema(&mut db);
 
     // Populate the DB
-    import_stack_graph_blobs(&mut db, "single_file_python/simple.py");
+    import_stack_graph_blobs(&mut db, include_json_bytes!("single_file_python/simple.py"));
 
     // Perform a stack graph query
     let query = r#"
@@ -124,9 +163,9 @@ fn it_finds_definition_across_multiple_files() {
     apply_db_schema(&mut db);
 
     // Populate the DB
-    import_stack_graph_blobs(&mut db, "multi_file_python/main.py");
-    import_stack_graph_blobs(&mut db, "multi_file_python/a.py");
-    import_stack_graph_blobs(&mut db, "multi_file_python/b.py");
+    import_stack_graph_blobs(&mut db, include_json_bytes!("multi_file_python/main.py"));
+    import_stack_graph_blobs(&mut db, include_json_bytes!("multi_file_python/a.py"));
+    import_stack_graph_blobs(&mut db, include_json_bytes!("multi_file_python/b.py"));
 
     // Perform a stack graph query
     let query = r#"
@@ -154,7 +193,7 @@ fn it_returns_empty_without_errors_if_definition_is_not_available() {
     apply_db_schema(&mut db);
 
     // Populate the DB
-    import_stack_graph_blobs(&mut db, "multi_file_python/main.py");
+    import_stack_graph_blobs(&mut db, include_json_bytes!("multi_file_python/main.py"));
 
     // Perform a stack graph query
     let query = r#"
@@ -172,80 +211,53 @@ fn it_returns_empty_without_errors_if_definition_is_not_available() {
     assert!(query_result.rows.is_empty());
 }
 
+// TODO: DRY (this is basically the same code as in `beam_tree_sitter::stack_graph::serialization`)
 mod serialization {
-    use super::DataValue;
     use base64::engine::general_purpose::STANDARD;
     use base64_serde::base64_serde_type;
-    use serde::Deserialize;
 
     base64_serde_type!(pub Base64Standard, STANDARD);
 
-    #[derive(Deserialize)]
-    pub struct Blobs {
-        pub graph: GraphBlob,
-        pub node_paths: Vec<NodePathBlob>,
-        pub root_paths: Vec<RootPathBlob>,
-    }
-
-    #[derive(Deserialize)]
-    pub struct GraphBlob {
-        file: Box<str>,
+    #[derive(serde::Deserialize)]
+    pub struct Blob {
+        /// Length of [`data`][`Blob::data`] before any compression.
+        pub uncompressed_len: usize,
+        /// Possibly Zstd-compressed.
         #[serde(with = "Base64Standard")]
-        binary_data: Box<[u8]>,
-        uncompressed_len: usize,
+        pub data: Box<[u8]>,
     }
 
-    #[derive(Deserialize)]
+    #[derive(serde::Deserialize)]
     pub struct NodePathBlob {
-        file: Box<str>,
-        start_node_local_id: u32,
-        discriminant: usize,
-        uncompressed_len: usize,
-        #[serde(with = "Base64Standard")]
-        binary_data: Box<[u8]>,
+        /// The local ID of the node path’s start node.
+        pub start_node_local_id: u32,
+        /// The serialized node path.
+        #[serde(flatten)]
+        pub value: Blob,
     }
 
-    #[derive(Deserialize)]
+    #[derive(serde::Deserialize)]
     pub struct RootPathBlob {
-        file: Box<str>,
-        symbol_stack: Box<str>,
-        discriminant: usize,
-        uncompressed_len: usize,
-        #[serde(with = "Base64Standard")]
-        binary_data: Box<[u8]>,
+        /// An indexing key representing the symbol stack precondition. This
+        /// follows the SQLite storage implementation; see
+        /// [`PartialSymbolStackExt`].
+        pub symbol_stack: Box<str>,
+        /// The serialized root path.
+        #[serde(flatten)]
+        pub value: Blob,
     }
 
-    impl From<GraphBlob> for Vec<DataValue> {
-        fn from(value: GraphBlob) -> Self {
-            vec![
-                value.file.as_ref().into(),
-                (value.uncompressed_len as i64).into(),
-                value.binary_data.into_vec().into(),
-            ]
-        }
-    }
-
-    impl From<NodePathBlob> for Vec<DataValue> {
-        fn from(value: NodePathBlob) -> Self {
-            vec![
-                value.file.as_ref().into(),
-                (value.start_node_local_id as i64).into(),
-                (value.discriminant as i64).into(),
-                (value.uncompressed_len as i64).into(),
-                value.binary_data.into_vec().into(),
-            ]
-        }
-    }
-
-    impl From<RootPathBlob> for Vec<DataValue> {
-        fn from(value: RootPathBlob) -> Self {
-            vec![
-                value.file.as_ref().into(),
-                value.symbol_stack.as_ref().into(),
-                (value.discriminant as i64).into(),
-                (value.uncompressed_len as i64).into(),
-                value.binary_data.into_vec().into(),
-            ]
-        }
+    #[derive(serde::Deserialize)]
+    pub struct Blobs {
+        /// The path to the file of the serialized graph & paths.
+        pub file: Box<str>,
+        /// The serialized graph.
+        pub graph: Blob,
+        /// The serialized node paths; more than one can have the same
+        /// [`start_node_local_id`][`NodePathBlob::start_node_local_id`].
+        pub node_paths: Box<[NodePathBlob]>,
+        /// The serialized node paths; more than one can have the same
+        /// [`symbol_stack`][`RootPathBlob::symbol_stack`].
+        pub root_paths: Box<[RootPathBlob]>,
     }
 }
