@@ -14,7 +14,7 @@ mod query;
 mod source_pos;
 mod state;
 
-use error::Error;
+use error::{Error, SourcePosError};
 use query::Querier;
 use source_pos::SourcePos;
 
@@ -62,21 +62,35 @@ impl FixedRule for StackGraphQuery {
 
         debug!(" ↳ Initialized state for StackGraphQuery fixed rule");
 
-        let source_pos = payload.string_option("reference", None)?;
-        let source_pos = source_pos
-            .parse::<SourcePos>()
-            .map_err(|e| Error::InvalidSourcePos {
-                got: source_pos.into(),
-                source: e,
-            })?;
+        let references = payload
+            .expr_option("references", None)?
+            .eval_to_const()
+            .map_err(|e| Error::SourcePos(SourcePosError::Other(e)))?;
+        let references = references
+            .get_slice()
+            .ok_or(Error::SourcePos(SourcePosError::InvalidType { expected: "list of strings" }))?
+            .iter()
+            .map(|d| d.get_str()
+                .ok_or(Error::SourcePos(SourcePosError::InvalidType { expected: "string" })))
+            .collect::<Result<Vec<_>, _>>()?;
+        let source_poss = references
+            .into_iter()
+            .map(|s| s.parse::<SourcePos>()
+                .map_err(|e| Error::SourcePos(
+                    SourcePosError::Parse { got: s.into(), source: e })))
+            .collect::<Result<Vec<_>, _>>()?;
 
         debug!(
-            " ↳ Got reference source position \"{source_pos}\" for StackGraphQuery fixed rule..."
+            " ↳ Got reference source positions {:?} for StackGraphQuery fixed rule...",
+            SourcePoss(&source_poss),
         );
 
         let mut querier = Querier::new(&mut state);
-        for def_urn in querier.definitions(&source_pos, &PoisonCancellation(poison))? {
-            out.put(vec![DataValue::from(def_urn.to_string())])
+        for resolution in querier.definitions(&source_poss, &PoisonCancellation(poison))? {
+            out.put(vec![
+                DataValue::from(resolution.reference.to_string()),
+                DataValue::from(resolution.definition.to_string()),
+            ])
         }
 
         debug!(" ↳ Finished running StackGraphQuery fixed rule");
@@ -98,4 +112,14 @@ impl stack_graphs::CancellationFlag for PoisonCancellation {
 fn pluralize(count: usize, singular: &'static str) -> String {
     // TODO: Irregular pluralization (i.e. not just with “s”, like in “query/queries”)
     format!("{count} {singular}{}", if count == 1 { "" } else { "s" })
+}
+
+struct SourcePoss<'s>(&'s [SourcePos]);
+
+impl std::fmt::Debug for SourcePoss<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_list()
+            .entries(self.0.iter().map(std::string::ToString::to_string))
+            .finish()
+    }
 }

@@ -107,11 +107,13 @@ fn it_finds_definition_in_single_file() {
     root_paths[file, symbol_stack, uncompressed_value_len, value] :=
         *sg_root_paths[file, symbol_stack, _, uncompressed_value_len, value]
 
-    ?[urn] <~ StackGraph(graphs[], node_paths[], root_paths[], reference: 'simple.py:13:14')
+    ?[urn] <~ StackGraph(graphs[], node_paths[], root_paths[], references: ['simple.py:13:14'])
     "#;
     let query_result = db.run_default(query).unwrap();
 
-    let expected = vec![vec![DataValue::from("simple.py:0:1")]];
+    let expected = vec![
+        vec![DataValue::from("simple.py:13:14"), DataValue::from("simple.py:0:1")],
+    ];
     assert_eq!(expected, query_result.rows);
 }
 
@@ -137,11 +139,13 @@ fn it_finds_definition_across_multiple_files() {
     root_paths[file, symbol_stack, uncompressed_value_len, value] :=
         *sg_root_paths[file, symbol_stack, _, uncompressed_value_len, value]
 
-    ?[urn] <~ StackGraph(graphs[], node_paths[], root_paths[], reference: 'main.py:22:25')
+    ?[urn] <~ StackGraph(graphs[], node_paths[], root_paths[], references: ['main.py:22:25'])
     "#;
     let query_result = db.run_default(query).unwrap();
 
-    let expected = vec![vec![DataValue::from("b.py:0:3")]];
+    let expected = vec![
+        vec![DataValue::from("main.py:22:25"), DataValue::from("b.py:0:3")],
+    ];
     assert_eq!(expected, query_result.rows);
 }
 
@@ -165,7 +169,7 @@ fn it_returns_empty_without_errors_if_definition_is_not_available() {
     root_paths[file, symbol_stack, uncompressed_value_len, value] :=
         *sg_root_paths[file, symbol_stack, _, uncompressed_value_len, value]
 
-    ?[urn] <~ StackGraph(graphs[], node_paths[], root_paths[], reference: 'main.py:22:25')
+    ?[urn] <~ StackGraph(graphs[], node_paths[], root_paths[], references: ['main.py:22:25'])
     "#;
     let query_result = db.run_default(query).unwrap();
 

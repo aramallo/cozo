@@ -8,17 +8,14 @@ pub enum Error {
     Cancelled(&'static str),
     #[error("invalid database tuple")]
     Tuple(#[from] TupleError),
+    #[error(transparent)]
+    SourcePos(SourcePosError),
     #[error("duplicate blobs for file with ID {0:?}")]
     DuplicateGraph(String),
     #[error("path blob refers to unknown file with ID {0:?}")]
     UnknownFile(String),
     #[error("missing {0}")]
     MissingData(String),
-    #[error("invalid source position {got:?}")]
-    InvalidSourcePos {
-        got: String,
-        source: super::source_pos::ParseError,
-    },
     #[error("failed to deserialize blob for {what}")]
     DeserializeBlob {
         what: String,
@@ -26,6 +23,17 @@ pub enum Error {
     },
     #[error("failed to find reference at source position {0}")]
     Query(super::SourcePos),
+}
+
+#[derive(Debug, thiserror::Error, Diagnostic)]
+pub enum SourcePosError {
+    #[error("invalid references type; expected {expected}")]
+    InvalidType { expected: &'static str, },
+    #[error("invalid source position {got:?}")]
+    Parse { got: String, source: super::source_pos::ParseError },
+    // TODO: Better handle `miette::Report`s?
+    #[error("invalid source positions: {0:#}")]
+    Other(miette::Report),
 }
 
 #[derive(Debug, thiserror::Error, Diagnostic)]
