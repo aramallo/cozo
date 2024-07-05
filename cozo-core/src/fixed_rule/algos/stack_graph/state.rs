@@ -36,12 +36,14 @@ type NodeID = (FileID, u32);
 /// [`Loaded`][`LoadState::Loaded`], that simply means the data has already
 /// been loaded; if the key does not exist, that’s an error.
 pub(super) struct State {
-    /// Indexed by Git `BLOB_OID`
+    /// Indexed by file ID.
     graph_blobs: HashMap<FileID, LoadState<Blob>>,
-    /// Indexed by Git `BLOB_OID` & local ID
+    /// Indexed by file ID & local ID.
     node_path_blobs: HashMap<NodeID, LoadState<Vec<Blob>>>,
-    /// Indexed by serialized symbol stacks
-    root_path_blobs: HashMap<Box<str>, LoadState<Vec<(FileID, Blob)>>>,
+    /// Indexed by symbol stacks patterns; multiple can refer to the same root path.
+    root_paths_index: HashMap<Box<str>, Vec<usize>>,
+    /// Storage indexed by [`root_paths_index`][`Storage::root_paths_index`] values.
+    root_path_blobs: Vec<LoadState<(FileID, Blob)>>,
     pub(super) graph: StackGraph,
     partials: PartialPaths,
     db: Database,
@@ -84,7 +86,7 @@ impl State {
 
         debug!(
             " ↳ Indexed {}...",
-            pluralize(indexed_graph_blobs.len(), "file graph")
+            pluralize(indexed_graph_blobs.len(), "file graph"),
         );
 
         let mut count = 0;
@@ -108,36 +110,40 @@ impl State {
         debug!(
             " ↳ Indexed {} from {}...",
             pluralize(count, "node path"),
-            pluralize(indexed_node_path_blobs.len(), "node")
+            pluralize(indexed_node_path_blobs.len(), "node"),
         );
 
-        let mut count = 0;
-        let mut indexed_root_path_blobs = HashMap::new();
+        let mut root_paths_index = HashMap::new();
+        let mut all_root_path_blobs = Vec::with_capacity(root_path_blobs.size_hint().0);
         for root_path_blob in root_path_blobs {
             let root_path_blob = root_path_blob?;
-            if !indexed_graph_blobs.contains_key(root_path_blob.file_id.as_ref()) {
-                return Err(Error::UnknownFile(root_path_blob.file_id.into()));
-            };
-            let LoadState::Unloaded(files_blobs) = indexed_root_path_blobs
-                .entry(root_path_blob.precondition_symbol_stack)
-                .or_insert_with(|| LoadState::Unloaded(Vec::new()))
-            else {
-                unreachable!()
-            };
-            files_blobs.push((root_path_blob.file_id, root_path_blob.blob));
-            count += 1;
+            let idx = all_root_path_blobs.len();
+            all_root_path_blobs.push(LoadState::Unloaded((
+                root_path_blob.file_id.clone(),
+                root_path_blob.blob,
+            )));
+
+            for symbol_stack_pattern in PartialSymbolStackExt::key_patterns_from_storage_key(
+                &root_path_blob.precondition_symbol_stack,
+            ) {
+                let idxs = root_paths_index
+                    .entry(symbol_stack_pattern)
+                    .or_insert_with(Vec::new);
+                idxs.push(idx);
+            }
         }
 
         debug!(
             " ↳ Indexed {} from {}...",
-            pluralize(count, "root path"),
-            pluralize(indexed_root_path_blobs.len(), "symbol stack")
+            pluralize(all_root_path_blobs.len(), "root path"),
+            pluralize(root_paths_index.len(), "symbol stack patterns"),
         );
 
         Ok(Self {
             graph_blobs: indexed_graph_blobs,
             node_path_blobs: indexed_node_path_blobs,
-            root_path_blobs: indexed_root_path_blobs,
+            root_paths_index,
+            root_path_blobs: all_root_path_blobs,
             graph,
             partials: PartialPaths::new(),
             db: Database::new(),
@@ -259,7 +265,7 @@ impl State {
 
         debug!(
             "Load node path extensions from node {}",
-            node.display(&self.graph)
+            node.display(&self.graph),
         );
         let id = self.graph[node].id();
         let Some(file_id) = id.file().map(|f| self.graph[f].name()) else {
@@ -307,14 +313,14 @@ impl State {
             count += 1;
             debug!(
                 " ↳ → Loaded node path extension {}",
-                path.display(&self.graph, &mut self.partials)
+                path.display(&self.graph, &mut self.partials),
             );
 
             self.db
                 .add_partial_path(&self.graph, &mut self.partials, path);
         }
 
-        debug!(" ↳ Loaded {}", pluralize(count, "node path extension"),);
+        debug!(" ↳ Loaded {}", pluralize(count, "node path extension"));
 
         Ok(())
     }
@@ -326,40 +332,47 @@ impl State {
     ) -> Result<()> {
         // Adapted from:
         // https://github.com/github/stack-graphs/blob/2c97ba2/stack-graphs/src/storage.rs#L631
+        debug!(
+            "Load root path extensions for symbol stack {}",
+            symbol_stack.display(&self.graph, &mut self.partials)
+        );
         let (symbol_stack_patterns, _) = PartialSymbolStackExt(symbol_stack)
-            .storage_key_patterns(&self.graph, &mut self.partials);
-        for symbol_stack in symbol_stack_patterns {
+            .storage_key_patterns_from_path(&self.graph, &mut self.partials);
+        for symbol_stack_pattern in symbol_stack_patterns {
             debug!(
-                "Load root path extensions from root with prefix symbol stack \"{}\"",
-                symbol_stack
+                " ↳ Load root path extensions for symbol stack pattern {:?}",
+                symbol_stack_pattern,
             );
 
-            let Some(blobs_load_state) =
-                self.root_path_blobs.get_mut(symbol_stack.as_ref() as &str)
-            else {
-                debug!(" ↳ No root path extensions found");
+            let Some(idxs) = self.root_paths_index.get(symbol_stack_pattern.as_str()) else {
+                debug!("    ↳ No root path extensions found");
                 // Not all symbol stack patterns will have results
-                continue;
-            };
-
-            let Some(blobs) = blobs_load_state.load() else {
-                debug!(" ↳ Already loaded root path extensions");
-                self.stats.root_path_cached += 1;
                 continue;
             };
 
             self.stats.root_path_loads += 1;
             debug!(
-                " ↳ Found {}; decompressing, deserializing, & inserting...",
-                pluralize(blobs.len(), "root path extension"),
+                "    ↳ Found {}; decompressing, deserializing, & inserting...",
+                pluralize(idxs.len(), "root path extension"),
             );
 
             let mut count = 0usize;
 
-            let err_what = || format!("root path with symbol stack {:?}", symbol_stack);
-
-            for (file, blob) in blobs {
+            for &idx in idxs {
                 cancellation_flag.check("loading root paths")?;
+
+                let Some((file, blob)) = self.root_path_blobs[idx].load() else {
+                    debug!("    ↳ Already loaded root path extensions");
+                    self.stats.root_path_cached += 1;
+                    continue;
+                };
+
+                let err_what = || {
+                    format!(
+                        "root path with symbol stack pattern {:?}",
+                        symbol_stack_pattern,
+                    )
+                };
 
                 Self::load_graph_for_file_inner(
                     &file,
@@ -377,15 +390,15 @@ impl State {
 
                 count += 1;
                 debug!(
-                    " ↳ → Loaded {}",
-                    path.display(&self.graph, &mut self.partials)
+                    "    ↳ → Loaded root path extension {}",
+                    path.display(&self.graph, &mut self.partials),
                 );
 
                 self.db
                     .add_partial_path(&self.graph, &mut self.partials, path);
             }
 
-            debug!(" ↳ Loaded {}", pluralize(count, "root path extension"),);
+            debug!("    ↳ Loaded {}", pluralize(count, "root path extension"));
         }
         Ok(())
     }
@@ -434,7 +447,7 @@ impl PartialSymbolStackExt {
 
     /// Returns string representations for all prefixes of this symbol stack for querying the
     /// index in the database.
-    fn storage_key_patterns(
+    fn storage_key_patterns_from_path(
         mut self,
         graph: &StackGraph,
         partials: &mut PartialPaths,
@@ -445,21 +458,46 @@ impl PartialSymbolStackExt {
             if !symbols.is_empty() {
                 symbols += "\u{241F}";
             }
-            let symbol = graph[symbol.symbol]
-                .replace('%', "\\%")
-                .replace('_', "\\_")
-                .to_string();
-            symbols += &symbol;
-            // patterns for paths matching a prefix of this stack
+            symbols += &graph[symbol.symbol];
+            // Patterns for paths matching a prefix of this stack
             key_patterns.push(format!("V\u{241E}{symbols}"));
         }
-        // pattern for paths matching exactly this stack
+        // Pattern for paths matching exactly this stack
         key_patterns.push(format!("X\u{241E}{symbols}"));
         if self.0.has_variable() {
-            // patterns for paths for which this stack is a prefix
-            key_patterns.push(format!("_\u{241E}{symbols}\u{241F}%"));
+            let escaped_symbols = symbols.replace('%', "\\%").replace('_', "\\_");
+            // Patterns for paths for which this stack is a prefix
+            key_patterns.push(format!("_\u{241E}{escaped_symbols}\u{241F}%"));
         }
         (key_patterns, "\\".to_string())
+    }
+
+    /// Essentially implements the `LIKE` operator of the SQLite implementation.
+    fn key_patterns_from_storage_key(key: &str) -> Vec<Box<str>> {
+        let mut key_patterns = Vec::new();
+        key_patterns.push(key.into());
+
+        let mut offset = 0;
+        let escaped_key = key.replace('%', "\\%").replace('_', "\\_");
+        let mut prev = None;
+        while offset < escaped_key.len() {
+            // This makes sure we don’t prefix-match against the “full” key,
+            // because we should only match against the full key exactly.
+            if let Some(prev) = prev.take() {
+                key_patterns.push(prev);
+            }
+            let Some(pos) = escaped_key[offset..]
+                .char_indices()
+                .find_map(|(pos, chr)| (chr == '\u{241F}').then_some(pos))
+            else {
+                break;
+            };
+            prev = Some(format!("_{}%", &escaped_key[1..offset + pos]).into());
+            offset += pos + '\u{241F}'.len_utf8();
+        }
+        key_patterns.push(format!("_{}%", &escaped_key[1..]).into());
+
+        key_patterns
     }
 }
 
