@@ -19,9 +19,14 @@ pub(super) struct Querier<'state> {
     // TODO: Stats? Reporting?
 }
 
+pub(super) enum ResolutionKind {
+    Found { definition: SourcePos },
+    Search { root_path_symbol_stack_pattern: String },
+}
+
 pub(super) struct Resolution {
     pub(super) reference: SourcePos,
-    pub(super) definition: SourcePos,
+    pub(super) kind: ResolutionKind,
 }
 
 impl<'state> Querier<'state> {
@@ -32,11 +37,23 @@ impl<'state> Querier<'state> {
     pub fn definitions(
         &mut self,
         ref_source_poss: &[SourcePos],
+        output_root_path_symbol_stack_patterns: bool,
         cancellation_flag: &dyn CancellationFlag,
     ) -> Result<Vec<Resolution>> {
         let mut resolutions = Vec::new();
 
+        let prev_root_path_symbol_stack_patterns = std::mem::replace(
+            &mut self.db.root_path_symbol_stack_patterns,
+            if output_root_path_symbol_stack_patterns {
+                Some(Vec::new())
+            } else {
+                None
+            },
+        );
+
         for ref_source_pos in ref_source_poss {
+            cancellation_flag.check("finding next reference")?;
+
             debug!("Finding definitions for reference at \"{ref_source_pos}\"...");
 
             let nodes = self.db.load_nodes(ref_source_pos)?.collect::<Vec<_>>();
@@ -85,13 +102,27 @@ impl<'state> Querier<'state> {
                     let file = graph[path.end_node].file()?; // Def. nodes should be in a file
                     let byte_range = node_byte_range(graph, path.end_node)?; // Def. nodes should have source info
                     Some(Resolution {
-                        reference: ref_source_pos.clone(), definition: SourcePos {
+                        reference: ref_source_pos.clone(),
+                        kind: ResolutionKind::Found { definition: SourcePos {
                             file_id: graph[file].name().into(),
                             byte_range,
-                        }
+                        } },
                     })
-                }))
+                }));
+
+            if let Some(root_path_symbol_stack_patterns) =
+                self.db.root_path_symbol_stack_patterns.as_mut()
+            {
+                resolutions.extend(root_path_symbol_stack_patterns.drain(..).map(
+                    |root_path_symbol_stack_pattern| Resolution {
+                        reference: ref_source_pos.clone(),
+                        kind: ResolutionKind::Search { root_path_symbol_stack_pattern, },
+                    },
+                ))
+            }
         }
+
+        self.db.root_path_symbol_stack_patterns = prev_root_path_symbol_stack_patterns;
 
         Ok(resolutions)
     }

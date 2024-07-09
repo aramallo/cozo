@@ -111,10 +111,9 @@ fn it_finds_definition_in_single_file() {
     "#;
     let query_result = db.run_default(query).unwrap();
 
-    let expected = vec![
-        vec![DataValue::from("simple.py:13:14"), DataValue::from("simple.py:0:1")],
-    ];
-    assert_eq!(expected, query_result.rows);
+    assert_eq!(query_result.rows, &[
+        vec!["simple.py:13:14".into(), "simple.py:0:1".into(), DataValue::Null],
+    ]);
 }
 
 #[test]
@@ -141,10 +140,9 @@ fn it_finds_definition_across_multiple_files() {
     "#;
     let query_result = db.run_default(query).unwrap();
 
-    let expected = vec![
-        vec![DataValue::from("main.py:22:25"), DataValue::from("b.py:0:3")],
-    ];
-    assert_eq!(expected, query_result.rows);
+    assert_eq!(query_result.rows, &[
+        vec!["main.py:22:25".into(), "b.py:0:3".into(), DataValue::Null],
+    ]);
 }
 
 #[test]
@@ -169,7 +167,44 @@ fn it_returns_empty_without_errors_if_definition_is_not_available() {
     "#;
     let query_result = db.run_default(query).unwrap();
 
-    assert!(query_result.rows.is_empty());
+    assert_eq!(query_result.rows, &[] as &[Vec<_>]);
+}
+
+#[test]
+fn it_optionally_outputs_root_path_symbol_stack_patterns() {
+    init_logging();
+
+    // Initialize the DB
+    let mut db = DbInstance::default();
+    apply_db_schema(&mut db);
+
+    // Populate the DB
+    import_stack_graph_blobs(&mut db, include_json_bytes!("multi_file_python/main.py"));
+
+    // Perform a stack graph query
+    let query = r#"
+    file_path[file, local_id, size, value] :=
+        *sg_file_path{file, local_id, size, value}
+    root_path[file, symbol_stack, size, value] :=
+        *sg_root_path{file, symbol_stack, size, value}
+
+    ?[] <~ StackGraph(*sg[], file_path[], root_path[],
+        references: ['main.py:22:25'],
+        output_root_path_symbol_stack_patterns: true,
+    )
+    "#;
+    let query_result = db.run_default(query).unwrap();
+
+    assert_eq!(query_result.rows, &[
+        vec!["main.py:22:25".into(), DataValue::Null, "V␞<builtins>".into()],
+        vec!["main.py:22:25".into(), DataValue::Null, "V␞<builtins>␟.".into()],
+        vec!["main.py:22:25".into(), DataValue::Null, "V␞<builtins>␟.␟foo".into()],
+        vec!["main.py:22:25".into(), DataValue::Null, "V␞a".into()],
+        vec!["main.py:22:25".into(), DataValue::Null, "V␞a␟.".into()],
+        vec!["main.py:22:25".into(), DataValue::Null, "V␞a␟.␟foo".into()],
+        vec!["main.py:22:25".into(), DataValue::Null, "X␞<builtins>␟.␟foo".into()],
+        vec!["main.py:22:25".into(), DataValue::Null, "X␞a␟.␟foo".into()],
+    ]);
 }
 
 mod serialization {
