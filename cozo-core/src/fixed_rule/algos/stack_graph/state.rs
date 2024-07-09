@@ -48,6 +48,7 @@ pub(super) struct State {
     partials: PartialPaths,
     db: Database,
     stats: Stats,
+    pub(super) root_path_symbol_stack_patterns: Option<Vec<String>>,
 }
 
 enum LoadState<T> {
@@ -148,6 +149,7 @@ impl State {
             partials: PartialPaths::new(),
             db: Database::new(),
             stats: Stats::default(),
+            root_path_symbol_stack_patterns: None,
         })
     }
 
@@ -338,6 +340,11 @@ impl State {
         );
         let (symbol_stack_patterns, _) = PartialSymbolStackExt(symbol_stack)
             .storage_key_patterns_from_path(&self.graph, &mut self.partials);
+
+        if let Some(root_path_symbol_stack_patterns) = self.root_path_symbol_stack_patterns.as_mut() {
+            root_path_symbol_stack_patterns.extend(symbol_stack_patterns.iter().cloned());
+        }
+
         for symbol_stack_pattern in symbol_stack_patterns {
             debug!(
                 " ↳ Load root path extensions for symbol stack pattern {:?}",
