@@ -1,24 +1,24 @@
-{:create sg_graphs {
+{:create sg {
     file: String
     =>
-    uncompressed_value_len: Int,
+    size: Int,
     value: Bytes
 }}
 
-{:create sg_node_paths {
+{:create sg_file_path {
     file: String,
-    start_local_id: Int,
-    discriminator: Int # Used to make primary key unique (`file` & `start_local_id` need not be)
+    local_id: Int,
+    discriminator: Int # Used to make primary key unique (`file` & `local_id` need not be)
     =>
-    uncompressed_value_len: Int,
+    size: Int,
     value: Bytes
 }}
 
-{:create sg_root_paths {
+{:create sg_root_path {
     file: String,
     symbol_stack: String,
     discriminator: Int # Used to make primary key unique (`file` & `symbol_stack` need not be)
     =>
-    uncompressed_value_len: Int,
+    size: Int,
     value: Bytes
 }}

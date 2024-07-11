@@ -15,11 +15,11 @@ fn apply_db_schema(db: &mut DbInstance) {
 
 fn import_graphs_data(db: &mut DbInstance, rows: Vec<Vec<DataValue>>) {
     db.import_relations(BTreeMap::from([(
-        "sg_graphs".to_string(),
+        "sg".to_string(),
         NamedRows {
             headers: vec![
                 "file".to_string(),
-                "uncompressed_value_len".to_string(),
+                "size".to_string(),
                 "value".to_string(),
             ],
             rows,
@@ -31,13 +31,13 @@ fn import_graphs_data(db: &mut DbInstance, rows: Vec<Vec<DataValue>>) {
 
 fn import_node_paths_data(db: &mut DbInstance, rows: Vec<Vec<DataValue>>) {
     db.import_relations(BTreeMap::from([(
-        "sg_node_paths".to_string(),
+        "sg_file_path".to_string(),
         NamedRows {
             headers: vec![
                 "file".to_string(),
-                "start_local_id".to_string(),
+                "local_id".to_string(),
                 "discriminator".to_string(),
-                "uncompressed_value_len".to_string(),
+                "size".to_string(),
                 "value".to_string(),
             ],
             rows,
@@ -49,13 +49,13 @@ fn import_node_paths_data(db: &mut DbInstance, rows: Vec<Vec<DataValue>>) {
 
 fn import_root_paths_data(db: &mut DbInstance, rows: Vec<Vec<DataValue>>) {
     db.import_relations(BTreeMap::from([(
-        "sg_root_paths".to_string(),
+        "sg_root_path".to_string(),
         NamedRows {
             headers: vec![
                 "file".to_string(),
                 "symbol_stack".to_string(),
                 "discriminator".to_string(),
-                "uncompressed_value_len".to_string(),
+                "size".to_string(),
                 "value".to_string(),
             ],
             rows,
@@ -102,12 +102,12 @@ fn it_finds_definition_in_single_file() {
 
     // Perform a stack graph query
     let query = r#"
-    node_paths[file, start_local_id, uncompressed_value_len, value] :=
-        *sg_node_paths[file, start_local_id, _, uncompressed_value_len, value]
-    root_paths[file, symbol_stack, uncompressed_value_len, value] :=
-        *sg_root_paths[file, symbol_stack, _, uncompressed_value_len, value]
+    file_path[file, local_id, size, value] :=
+        *sg_file_path{file, local_id, size, value}
+    root_path[file, symbol_stack, size, value] :=
+        *sg_root_path{file, symbol_stack, size, value}
 
-    ?[] <~ StackGraph(*sg_graphs[], node_paths[], root_paths[], references: ['simple.py:13:14'])
+    ?[] <~ StackGraph(*sg[], file_path[], root_path[], references: ['simple.py:13:14'])
     "#;
     let query_result = db.run_default(query).unwrap();
 
@@ -132,12 +132,12 @@ fn it_finds_definition_across_multiple_files() {
 
     // Perform a stack graph query
     let query = r#"
-    node_paths[file, start_local_id, uncompressed_value_len, value] :=
-        *sg_node_paths[file, start_local_id, _, uncompressed_value_len, value]
-    root_paths[file, symbol_stack, uncompressed_value_len, value] :=
-        *sg_root_paths[file, symbol_stack, _, uncompressed_value_len, value]
+    file_path[file, local_id, size, value] :=
+        *sg_file_path{file, local_id, size, value}
+    root_path[file, symbol_stack, size, value] :=
+        *sg_root_path{file, symbol_stack, size, value}
 
-    ?[] <~ StackGraph(*sg_graphs[], node_paths[], root_paths[], references: ['main.py:22:25'])
+    ?[] <~ StackGraph(*sg[], file_path[], root_path[], references: ['main.py:22:25'])
     "#;
     let query_result = db.run_default(query).unwrap();
 
@@ -160,12 +160,12 @@ fn it_returns_empty_without_errors_if_definition_is_not_available() {
 
     // Perform a stack graph query
     let query = r#"
-    node_paths[file, start_local_id, uncompressed_value_len, value] :=
-        *sg_node_paths[file, start_local_id, _, uncompressed_value_len, value]
-    root_paths[file, symbol_stack, uncompressed_value_len, value] :=
-        *sg_root_paths[file, symbol_stack, _, uncompressed_value_len, value]
+    file_path[file, local_id, size, value] :=
+        *sg_file_path{file, local_id, size, value}
+    root_path[file, symbol_stack, size, value] :=
+        *sg_root_path{file, symbol_stack, size, value}
 
-    ?[] <~ StackGraph(*sg_graphs[], node_paths[], root_paths[], references: ['main.py:22:25'])
+    ?[] <~ StackGraph(*sg[], file_path[], root_path[], references: ['main.py:22:25'])
     "#;
     let query_result = db.run_default(query).unwrap();
 
