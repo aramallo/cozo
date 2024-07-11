@@ -28,7 +28,7 @@ impl FixedRule for StackGraphQuery {
         _rule_head: &[Symbol],
         _span: SourceSpan,
     ) -> Result<usize> {
-        Ok(2)
+        Ok(3)
     }
 
     /// The outputs tuples are written to `out`
