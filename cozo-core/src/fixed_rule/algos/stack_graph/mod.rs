@@ -15,7 +15,7 @@ mod source_pos;
 mod state;
 
 use error::{Error, SourcePosError};
-use query::{Querier, ResolutionKind};
+use query::Querier;
 use source_pos::SourcePos;
 
 pub(crate) struct StackGraphQuery;
@@ -79,37 +79,18 @@ impl FixedRule for StackGraphQuery {
                 .map_err(|e| Error::SourcePos(
                     SourcePosError::Parse { got: s.into(), source: e })))
             .collect::<Result<Vec<_>, _>>()?;
+
         debug!(
             " ↳ Got reference source positions {:?} for StackGraphQuery fixed rule...",
             SourcePoss(&source_poss),
         );
 
-        let output_root_path_symbol_stack_patterns = payload
-            .bool_option("output_root_path_symbol_stack_patterns", Some(false))
-            .map_err(|_| Error::OutputRootPathSymbolStackPatterns)?;
-        debug!(
-            " ↳ {}utputting root path symbol stack patterns from StackGraphQuery fixed rule...",
-            if output_root_path_symbol_stack_patterns { "O" } else { "Not o" },
-        );
-
         let mut querier = Querier::new(&mut state);
-        for resolution in querier.definitions(
-            &source_poss,
-            output_root_path_symbol_stack_patterns,
-            &PoisonCancellation(poison),
-        )? {
-            match resolution.kind {
-                ResolutionKind::Found { definition } => out.put(vec![
-                    resolution.reference.to_string().into(),
-                    definition.to_string().into(),
-                    DataValue::Null,
-                ]),
-                ResolutionKind::Search { root_path_symbol_stack_pattern } => out.put(vec![
-                    resolution.reference.to_string().into(),
-                    DataValue::Null,
-                    root_path_symbol_stack_pattern.into(),
-                ]),
-            }
+        for resolution in querier.definitions(&source_poss, &PoisonCancellation(poison))? {
+            out.put(vec![
+                DataValue::from(resolution.reference.to_string()),
+                DataValue::from(resolution.definition.to_string()),
+            ])
         }
 
         debug!(" ↳ Finished running StackGraphQuery fixed rule");
