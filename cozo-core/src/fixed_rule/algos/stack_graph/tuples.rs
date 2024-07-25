@@ -2,29 +2,36 @@ use crate::data::{tuple::Tuple, value::DataValue};
 
 use super::error::{Error, TupleError};
 
+
 pub struct Blob {
     pub uncompressed_len: usize,
     pub data: Box<[u8]>,
 }
 
-pub struct GraphBlob {
+pub struct Graph {
     pub file_id: Box<str>,
     pub blob: Blob,
 }
 
-pub struct NodePathBlob {
+pub struct NodePath {
     pub file_id: Box<str>,
     pub start_node_local_id: u32,
     pub blob: Blob,
 }
 
-pub struct RootPathBlob {
+pub struct RootPath {
     pub file_id: Box<str>,
     pub precondition_symbol_stack: Box<str>,
     pub blob: Blob,
 }
 
-impl TryFrom<Tuple> for GraphBlob {
+pub struct RootPathSymbolStackFileId {
+    pub root_path_symbol_stack: Box<str>,
+    pub file_id: Box<str>,
+}
+
+
+impl TryFrom<Tuple> for Graph {
     type Error = Error;
     fn try_from(tuple: Tuple) -> Result<Self, Self::Error> {
         tuple.check_len(3)?;
@@ -44,7 +51,7 @@ impl TryFrom<Tuple> for GraphBlob {
     }
 }
 
-impl TryFrom<Tuple> for NodePathBlob {
+impl TryFrom<Tuple> for NodePath {
     type Error = Error;
     fn try_from(tuple: Tuple) -> Result<Self, Self::Error> {
         tuple.check_len(4)?;
@@ -71,7 +78,7 @@ impl TryFrom<Tuple> for NodePathBlob {
     }
 }
 
-impl TryFrom<Tuple> for RootPathBlob {
+impl TryFrom<Tuple> for RootPath {
     type Error = Error;
     fn try_from(tuple: Tuple) -> Result<Self, Self::Error> {
         tuple.check_len(4)?;
@@ -93,8 +100,23 @@ impl TryFrom<Tuple> for RootPathBlob {
         })
     }
 }
+impl TryFrom<Tuple> for RootPathSymbolStackFileId {
+    type Error = Error;
+    fn try_from(tuple: Tuple) -> Result<Self, Self::Error> {
+        tuple.check_len(2)?;
 
-trait TupleExt {
+        let root_path_symbol_stack = tuple.get_elem(0, DataValue::get_str, "string", None)?;
+        let file_id = tuple.get_elem(1, DataValue::get_str, "string", None)?;
+
+        // TODO: replace unwrap and handle error
+        Ok(Self {
+            root_path_symbol_stack: root_path_symbol_stack.into(),
+            file_id: file_id.into(),
+        })
+    }
+}
+
+pub(super) trait TupleExt {
     fn check_len(&self, expected: usize) -> Result<(), TupleError>;
     fn get_elem<'t, T, F>(
         &'t self,

@@ -111,10 +111,9 @@ fn it_finds_definition_in_single_file() {
     "#;
     let query_result = db.run_default(query).unwrap();
 
-    let expected = vec![
-        vec![DataValue::from("simple.py:13:14"), DataValue::from("simple.py:0:1")],
-    ];
-    assert_eq!(expected, query_result.rows);
+    assert_eq!(query_result.rows, &[
+        vec!["simple.py:13:14".into(), "simple.py:0:1".into(), DataValue::Null],
+    ]);
 }
 
 #[test]
@@ -141,10 +140,9 @@ fn it_finds_definition_across_multiple_files() {
     "#;
     let query_result = db.run_default(query).unwrap();
 
-    let expected = vec![
-        vec![DataValue::from("main.py:22:25"), DataValue::from("b.py:0:3")],
-    ];
-    assert_eq!(expected, query_result.rows);
+    assert_eq!(query_result.rows, &[
+        vec!["main.py:22:25".into(), "b.py:0:3".into(), DataValue::Null],
+    ]);
 }
 
 #[test]
@@ -170,6 +168,54 @@ fn it_returns_empty_without_errors_if_definition_is_not_available() {
     let query_result = db.run_default(query).unwrap();
 
     assert!(query_result.rows.is_empty());
+}
+
+#[test]
+fn it_returns_missing_files_if_definition_is_not_available() {
+    init_logging();
+
+    // Initialize the DB
+    let mut db = DbInstance::default();
+    apply_db_schema(&mut db);
+
+    // Populate the DB
+    import_stack_graph_blobs(&mut db, include_json_bytes!("multi_file_python/main.py"));
+    import_stack_graph_blobs(&mut db, include_json_bytes!("multi_file_python/a.py"));
+    import_stack_graph_blobs(&mut db, include_json_bytes!("multi_file_python/b.py"));
+
+    let query_template = r#"
+    graph[file, size, value] :=
+        FILTER_BY_FILE,
+        *sg{file, size, value}
+    file_path[file, local_id, size, value] :=
+        FILTER_BY_FILE,
+        *sg_file_path{file, local_id, size, value}
+    root_path[file, symbol_stack, size, value] :=
+        FILTER_BY_FILE,
+        *sg_root_path{file, symbol_stack, size, value}
+    root_path_symbol_stacks_files[symbol_stack, file] :=
+        *sg_root_path{file, symbol_stack}
+
+    ?[] <~ StackGraph(graph[], file_path[], root_path[], root_path_symbol_stacks_files[],
+        references: ['main.py:22:25'],
+        output_missing_files: true, # Not necessary -- 4th pos. arg. implies `true`
+    )
+    "#;
+
+    // Perform a first stack graph query
+    let first_query = query_template.replace("FILTER_BY_FILE", "file = 'main.py'");
+    let first_query_result = db.run_default(&first_query).unwrap();
+    assert_eq!(first_query_result.rows, &[
+        vec!["main.py:22:25".into(), DataValue::Null, "a.py".into()],
+    ]);
+
+    // Perform a second stack graph query
+    let second_query = query_template
+        .replace("FILTER_BY_FILE", "file = 'main.py' or file = 'a.py'");
+    let second_query_result = db.run_default(&second_query).unwrap();
+    assert_eq!(second_query_result.rows, &[
+        vec!["main.py:22:25".into(), DataValue::Null, "b.py".into()],
+    ]);
 }
 
 mod serialization {

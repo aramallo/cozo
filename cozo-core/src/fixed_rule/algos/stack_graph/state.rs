@@ -16,15 +16,15 @@ use stack_graphs::{
 };
 
 use super::{
-    blobs::{Blob, GraphBlob, NodePathBlob, RootPathBlob},
     error::Result,
+    tuples::{self, Blob},
     pluralize, Error, SourcePos,
 };
 
 /// Optionally Zstd-compressed (see [`decompress_if_needed`]).
 
-type FileID = Box<str>;
-type NodeID = (FileID, u32);
+pub(super) type FileId = Box<str>;
+type NodeId = (FileId, u32);
 
 /// State for a definition query. Fixed rules cannot themselves load data, so
 /// all data they might need must be provided. The `*_blobs` fields initially
@@ -37,17 +37,19 @@ type NodeID = (FileID, u32);
 /// been loaded; if the key does not exist, that’s an error.
 pub(super) struct State {
     /// Indexed by file ID.
-    graph_blobs: HashMap<FileID, LoadState<Blob>>,
+    graph_blobs: HashMap<FileId, LoadState<Blob>>,
     /// Indexed by file ID & local ID.
-    node_path_blobs: HashMap<NodeID, LoadState<Vec<Blob>>>,
+    node_path_blobs: HashMap<NodeId, LoadState<Vec<Blob>>>,
     /// Indexed by symbol stacks patterns; multiple can refer to the same root path.
     root_paths_index: HashMap<Box<str>, Vec<usize>>,
     /// Storage indexed by [`root_paths_index`][`Storage::root_paths_index`] values.
-    root_path_blobs: Vec<LoadState<(FileID, Blob)>>,
+    root_path_blobs: Vec<LoadState<(FileId, Blob)>>,
+    root_path_symbol_stack_patterns_files_index: HashMap<Box<str>, Vec<FileId>>,
     pub(super) graph: StackGraph,
     partials: PartialPaths,
     db: Database,
     stats: Stats,
+    pub(super) missing_files: Option<Vec<FileId>>,
 }
 
 enum LoadState<T> {
@@ -66,9 +68,12 @@ impl<T> LoadState<T> {
 
 impl State {
     pub(super) fn new(
-        graph_blobs: impl Iterator<Item = Result<GraphBlob>>,
-        node_path_blobs: impl Iterator<Item = Result<NodePathBlob>>,
-        root_path_blobs: impl Iterator<Item = Result<RootPathBlob>>,
+        graph_blobs: impl Iterator<Item = Result<tuples::Graph>>,
+        node_path_blobs: impl Iterator<Item = Result<tuples::NodePath>>,
+        root_path_blobs: impl Iterator<Item = Result<tuples::RootPath>>,
+        root_path_symbol_stacks_files: impl Iterator<
+            Item = Result<tuples::RootPathSymbolStackFileId>,
+        >,
     ) -> Result<Self> {
         let graph = StackGraph::new();
 
@@ -133,6 +138,21 @@ impl State {
             }
         }
 
+        let mut root_path_symbol_stack_patterns_files_index = HashMap::new();
+        for root_path_symbol_stack_file in root_path_symbol_stacks_files {
+            let tuples::RootPathSymbolStackFileId { root_path_symbol_stack, file_id }
+                = root_path_symbol_stack_file?;
+
+            for symbol_stack_pattern in PartialSymbolStackExt::key_patterns_from_storage_key(
+                &root_path_symbol_stack,
+            ) {
+                root_path_symbol_stack_patterns_files_index
+                    .entry(symbol_stack_pattern)
+                    .or_insert_with(Vec::new)
+                    .push(file_id.clone()); // TODO: Interning, instead of cloning?
+            }
+        }
+
         debug!(
             " ↳ Indexed {} from {}...",
             pluralize(all_root_path_blobs.len(), "root path"),
@@ -144,10 +164,12 @@ impl State {
             node_path_blobs: indexed_node_path_blobs,
             root_paths_index,
             root_path_blobs: all_root_path_blobs,
+            root_path_symbol_stack_patterns_files_index,
             graph,
             partials: PartialPaths::new(),
             db: Database::new(),
             stats: Stats::default(),
+            missing_files: None,
         })
     }
 
@@ -209,7 +231,7 @@ impl State {
     fn load_graph_for_file_inner<S: AsRef<str> + ?Sized>(
         file_id: &S,
         graph: &mut StackGraph,
-        graph_blobs: &mut HashMap<FileID, LoadState<Blob>>,
+        graph_blobs: &mut HashMap<FileId, LoadState<Blob>>,
         stats: &mut Stats,
     ) -> Result<Handle<File>> {
         let file_id: &str = file_id.as_ref();
@@ -343,6 +365,17 @@ impl State {
                 " ↳ Load root path extensions for symbol stack pattern {:?}",
                 symbol_stack_pattern,
             );
+
+            if let Some(missing_files) = self.missing_files.as_mut() {
+                if let Some(files) = self.root_path_symbol_stack_patterns_files_index
+                    .get(symbol_stack_pattern.as_str())
+                {
+                    missing_files.extend(files.iter()
+                        .filter(|file_id| !self.graph_blobs.contains_key(file_id.as_ref()))
+                        // TODO: Interning, instead of cloning?
+                        .cloned())
+                }
+            }
 
             let Some(idxs) = self.root_paths_index.get(symbol_stack_pattern.as_str()) else {
                 debug!("    ↳ No root path extensions found");
