@@ -8,14 +8,14 @@ use crate::{
     DataValue, Expr, FixedRule, FixedRulePayload, Poison, RegularTempStore, SourceSpan, Symbol,
 };
 
-mod blobs;
 mod error;
 mod query;
 mod source_pos;
 mod state;
+mod tuples;
 
 use error::{Error, SourcePosError};
-use query::Querier;
+use query::{Querier, ResolutionKind};
 use source_pos::SourcePos;
 
 pub(crate) struct StackGraphQuery;
@@ -53,12 +53,27 @@ impl FixedRule for StackGraphQuery {
             .iter()?
             .map(|tuple| tuple.map_err(E::tuple_report)?.try_into());
 
-        let root_path_blobs = payload.get_input(2)?.ensure_min_len(3)?;
-        let root_path_blobs = root_path_blobs
+        let root_path_blobs = payload.get_input(2)?
+            .ensure_min_len(3)?
             .iter()?
             .map(|tuple| tuple.map_err(E::tuple_report)?.try_into());
 
-        let mut state = state::State::new(graph_blobs, node_path_blobs, root_path_blobs)?;
+        let root_path_symbol_stacks_files =
+            if let Ok(root_path_symbol_stacks_files) = payload.get_input(3) {
+                Some(root_path_symbol_stacks_files
+                    .ensure_min_len(2)?
+                    .iter()?
+                    .map(|tuple| tuple.map_err(E::tuple_report)?.try_into()))
+            } else {
+                None
+            };
+        let output_missing_files = root_path_symbol_stacks_files.is_some();
+        let mut state = state::State::new(graph_blobs, node_path_blobs, root_path_blobs,
+            root_path_symbol_stacks_files.map_or_else::<Box<dyn Iterator<Item = _>>, _, _>(
+                || Box::new(std::iter::empty()),
+                |files| Box::new(files),
+            )
+        )?;
 
         debug!(" ↳ Initialized state for StackGraphQuery fixed rule");
 
@@ -80,17 +95,37 @@ impl FixedRule for StackGraphQuery {
                     SourcePosError::Parse { got: s.into(), source: e })))
             .collect::<Result<Vec<_>, _>>()?;
 
+        let output_missing_files = output_missing_files && payload
+            .bool_option("output_missing_files", Some(true))
+            .map_err(|_| Error::OutputMissingFiles)?;
+        debug!(
+            " ↳ {}utputting missing files from StackGraphQuery fixed rule...",
+            if output_missing_files { "O" } else { "Not o" },
+        );
+
         debug!(
             " ↳ Got reference source positions {:?} for StackGraphQuery fixed rule...",
             SourcePoss(&source_poss),
         );
 
         let mut querier = Querier::new(&mut state);
-        for resolution in querier.definitions(&source_poss, &PoisonCancellation(poison))? {
-            out.put(vec![
-                DataValue::from(resolution.reference.to_string()),
-                DataValue::from(resolution.definition.to_string()),
-            ])
+        for resolution in querier.definitions(
+            &source_poss,
+            output_missing_files,
+            &PoisonCancellation(poison),
+        )? {
+            match resolution.kind {
+                ResolutionKind::Definition(definition) => out.put(vec![
+                    resolution.reference.to_string().into(),
+                    definition.to_string().into(),
+                    DataValue::Null,
+                ]),
+                ResolutionKind::MissingFile(file_id) => out.put(vec![
+                    resolution.reference.to_string().into(),
+                    DataValue::Null,
+                    file_id.as_ref().into(),
+                ]),
+            }
         }
 
         debug!(" ↳ Finished running StackGraphQuery fixed rule");
