@@ -7,7 +7,7 @@ use stack_graphs::{
 use super::{
     error::Result,
     pluralize,
-    state::{node_byte_range, State},
+    state::{node_byte_range, FileId, State},
     Error, SourcePos,
 };
 
@@ -19,9 +19,14 @@ pub(super) struct Querier<'state> {
     // TODO: Stats? Reporting?
 }
 
+pub(super) enum ResolutionKind {
+    Definition(SourcePos),
+    MissingFile(FileId),
+}
+
 pub(super) struct Resolution {
     pub(super) reference: SourcePos,
-    pub(super) definition: SourcePos,
+    pub(super) kind: ResolutionKind,
 }
 
 impl<'state> Querier<'state> {
@@ -32,9 +37,15 @@ impl<'state> Querier<'state> {
     pub fn definitions(
         &mut self,
         ref_source_poss: &[SourcePos],
+        output_missing_files: bool,
         cancellation_flag: &dyn CancellationFlag,
     ) -> Result<Vec<Resolution>> {
         let mut resolutions = Vec::new();
+
+        let prev_missing_files = std::mem::replace(
+            &mut self.db.missing_files,
+            output_missing_files.then(Vec::new),
+        );
 
         for ref_source_pos in ref_source_poss {
             debug!("Finding definitions for reference at \"{ref_source_pos}\"...");
@@ -85,13 +96,25 @@ impl<'state> Querier<'state> {
                     let file = graph[path.end_node].file()?; // Def. nodes should be in a file
                     let byte_range = node_byte_range(graph, path.end_node)?; // Def. nodes should have source info
                     Some(Resolution {
-                        reference: ref_source_pos.clone(), definition: SourcePos {
+                        reference: ref_source_pos.clone(),
+                        kind: ResolutionKind::Definition(SourcePos {
                             file_id: graph[file].name().into(),
                             byte_range,
-                        }
+                        }),
                     })
-                }))
+                }));
+
+            if let Some(missing_files) = self.db.missing_files.as_mut() {
+                resolutions.extend(missing_files.drain(..).map(
+                    |file| Resolution {
+                        reference: ref_source_pos.clone(),
+                        kind: ResolutionKind::MissingFile(file.clone()),
+                    },
+                ))
+            }
         }
+
+        self.db.missing_files = prev_missing_files;
 
         Ok(resolutions)
     }

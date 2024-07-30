@@ -10,6 +10,8 @@ pub enum Error {
     Tuple(#[from] TupleError),
     #[error(transparent)]
     SourcePos(SourcePosError),
+    #[error("invalid output-missing-files option")]
+    OutputMissingFiles,
     #[error("duplicate blobs for file with ID {0:?}")]
     DuplicateGraph(String),
     #[error("path blob refers to unknown file with ID {0:?}")]
