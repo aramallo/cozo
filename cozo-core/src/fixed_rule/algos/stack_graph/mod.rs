@@ -18,6 +18,85 @@ use error::{Error, SourcePosError};
 use query::{Querier, ResolutionKind};
 use source_pos::SourcePos;
 
+/// A Cozo fixed rule that implements querying a Stack Graph.
+///
+/// ## Input
+///
+/// Takes as input a series of relations that contain binary blobs that
+/// represent the serialized stack graph and its partial paths (each “blob”
+/// field below may optionally be compressed using Zstd, in which case the
+/// blob is expected to start with the big-endian magic number `0x28b52ffd`):
+///
+/// ### Positional parameters
+///
+/// - graphs:
+///   - file path (string);
+///   - uncompressed blob size in bytes (unsigned integer);
+///   - blob (bytes).
+/// - node paths:
+///   - file path (string);
+///   - start node local ID (unsigned integer);
+///   - uncompressed blob size in bytes (unsigned integer);
+///   - blob (bytes);
+/// - root paths:
+///   - file path (string);
+///   - symbol stack (string);
+///   - uncompressed blob size in bytes (unsigned integer);
+///   - blob (bytes);
+/// - root paths index (optional):
+///   - symbol stack (string);
+///   - file path (string);
+///
+/// The first three parameters are required, and can either contain the entire
+/// multi-file stack graph, or a smaller subgraph over a subset of files.
+/// Definitions will be found as long as they are in this subgraph.
+///
+/// The fourth parameter is an index of symbol stacks to file paths over a
+/// larger set of files (typically the entire set). It may be omitted, but
+/// enables iterative querying, further detailed below.
+///
+/// ### Named option parameters
+///
+/// - `references` (list of strings): the references for which definitions are
+///   being queried;
+/// - `output_missing_files` (boolean, optional): whether or not the output may
+///   include any missing file paths (defaults to true if the optional fourth
+///   positional parameter is given, otherwise defaults to false).
+///
+/// Each reference in `references` has the following format:
+///
+/// ```norust
+/// {file path}:{start byte}:{end byte}
+/// ```
+///
+/// Where `file path` is the path of the file where the reference is found, and
+/// `start byte` and `end byte` are the UTF-8 or UTF-16 byte offsets of the
+/// start and end of the reference within that file (this encoding must match
+/// the encoding of the file itself at the time of indexing).
+///
+/// ## Output
+///
+/// Returns as output a 3-column relation that contains the input references,
+/// any found definitions, and optionally paths of any files missing from the
+/// subgraph where missing definitions may still be found:
+///
+/// - reference (string);
+/// - definition (string or null);
+/// - missing file path (string or null).
+///
+/// An output tuple will always contain a reference, and either a definition or
+/// a missing file path, never neither and never both. Missing file paths are
+/// only returned if the 4th positional parameter (the root paths index) was
+/// given.
+///
+/// ## Iterative querying
+///
+/// If the input is only a subgraph of the multi-file stack graph, it may be
+/// that it does not contain some of the queried definitions. If the 4th
+/// positional parameter (the root paths index) was given, the fixed rule can
+/// still output the paths of any files missing from the subgraph. This lets
+/// the fixed rule be called iteratively with a progressively larger subgraph
+/// until all definitions are found.
 pub(crate) struct StackGraphQuery;
 
 impl FixedRule for StackGraphQuery {
