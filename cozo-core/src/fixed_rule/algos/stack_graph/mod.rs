@@ -163,6 +163,23 @@ impl FixedRule for StackGraphQuery {
 
         debug!(" ↳ Initialized state for StackGraphQuery fixed rule");
 
+        let timeout = payload
+            .expr_option("timeout", None)?
+            .eval_to_const()
+            .map_err(|e| Error::SourcePos(SourcePosError::Other(e)))?
+            .get_non_neg_int()
+            .ok_or(Error::SourcePos(SourcePosError::InvalidType {
+                expected: "list of timeout in milliseconds, or 0 if no timeout",
+            }))?;
+        let max_bytes = payload
+            .expr_option("max_bytes", None)?
+            .eval_to_const()
+            .map_err(|e| Error::SourcePos(SourcePosError::Other(e)))?
+            .get_non_neg_int()
+            .ok_or(Error::SourcePos(SourcePosError::InvalidType {
+                expected: "max amount of usable memory bytes",
+            }))?;
+
         let references = payload
             .expr_option("references", None)?
             .eval_to_const()
