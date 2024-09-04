@@ -17,8 +17,9 @@ use stack_graphs::{
 
 use super::{
     error::Result,
+    pluralize,
     tuples::{self, Blob},
-    pluralize, Error, SourcePos,
+    Error, SourcePos,
 };
 
 /// Optionally Zstd-compressed (see [`decompress_if_needed`]).
@@ -71,9 +72,7 @@ impl State {
         graph_blobs: impl Iterator<Item = Result<tuples::Graph>>,
         node_path_blobs: impl Iterator<Item = Result<tuples::NodePath>>,
         root_path_blobs: impl Iterator<Item = Result<tuples::RootPath>>,
-        root_path_symbol_stacks_files: impl Iterator<
-            Item = Result<tuples::RootPathSymbolStackFileId>,
-        >,
+        root_path_symbol_stacks_files: impl Iterator<Item = Result<tuples::RootPathSymbolStackFileId>>,
     ) -> Result<Self> {
         let graph = StackGraph::new();
 
@@ -140,12 +139,14 @@ impl State {
 
         let mut root_path_symbol_stack_patterns_files_index = HashMap::new();
         for root_path_symbol_stack_file in root_path_symbol_stacks_files {
-            let tuples::RootPathSymbolStackFileId { root_path_symbol_stack, file_id }
-                = root_path_symbol_stack_file?;
+            let tuples::RootPathSymbolStackFileId {
+                root_path_symbol_stack,
+                file_id,
+            } = root_path_symbol_stack_file?;
 
-            for symbol_stack_pattern in PartialSymbolStackExt::key_patterns_from_storage_key(
-                &root_path_symbol_stack,
-            ) {
+            for symbol_stack_pattern in
+                PartialSymbolStackExt::key_patterns_from_storage_key(&root_path_symbol_stack)
+            {
                 root_path_symbol_stack_patterns_files_index
                     .entry(symbol_stack_pattern)
                     .or_insert_with(Vec::new)
@@ -367,13 +368,17 @@ impl State {
             );
 
             if let Some(missing_files) = self.missing_files.as_mut() {
-                if let Some(files) = self.root_path_symbol_stack_patterns_files_index
+                if let Some(files) = self
+                    .root_path_symbol_stack_patterns_files_index
                     .get(symbol_stack_pattern.as_str())
                 {
-                    missing_files.extend(files.iter()
-                        .filter(|file_id| !self.graph_blobs.contains_key(file_id.as_ref()))
-                        // TODO: Interning, instead of cloning?
-                        .cloned())
+                    missing_files.extend(
+                        files
+                            .iter()
+                            .filter(|file_id| !self.graph_blobs.contains_key(file_id.as_ref()))
+                            // TODO: Interning, instead of cloning?
+                            .cloned(),
+                    )
                 }
             }
 

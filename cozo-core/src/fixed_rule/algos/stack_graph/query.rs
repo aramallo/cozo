@@ -89,28 +89,24 @@ impl<'state> Querier<'state> {
 
             debug!(" ↳ Found {}", pluralize(actual_paths.len(), "actual path"));
 
-            resolutions.extend(actual_paths
-                .into_iter()
-                .filter_map(|path| {
-                    // TODO: Bail?
-                    let file = graph[path.end_node].file()?; // Def. nodes should be in a file
-                    let byte_range = node_byte_range(graph, path.end_node)?; // Def. nodes should have source info
-                    Some(Resolution {
-                        reference: ref_source_pos.clone(),
-                        kind: ResolutionKind::Definition(SourcePos {
-                            file_id: graph[file].name().into(),
-                            byte_range,
-                        }),
-                    })
-                }));
+            resolutions.extend(actual_paths.into_iter().filter_map(|path| {
+                // TODO: Bail?
+                let file = graph[path.end_node].file()?; // Def. nodes should be in a file
+                let byte_range = node_byte_range(graph, path.end_node)?; // Def. nodes should have source info
+                Some(Resolution {
+                    reference: ref_source_pos.clone(),
+                    kind: ResolutionKind::Definition(SourcePos {
+                        file_id: graph[file].name().into(),
+                        byte_range,
+                    }),
+                })
+            }));
 
             if let Some(missing_files) = self.db.missing_files.as_mut() {
-                resolutions.extend(missing_files.drain(..).map(
-                    |file| Resolution {
-                        reference: ref_source_pos.clone(),
-                        kind: ResolutionKind::MissingFile(file.clone()),
-                    },
-                ))
+                resolutions.extend(missing_files.drain(..).map(|file| Resolution {
+                    reference: ref_source_pos.clone(),
+                    kind: ResolutionKind::MissingFile(file.clone()),
+                }))
             }
         }
 
