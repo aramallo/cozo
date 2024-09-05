@@ -87,7 +87,7 @@ impl State {
             else {
                 return Err(Error::DuplicateGraph(graph_blob.file_id.into()));
             };
-            byte_size += graph_blob.blob.data.len();
+            byte_size += graph_blob.blob.uncompressed_len;
             entry.insert(LoadState::Unloaded(graph_blob.blob));
         }
 
@@ -110,7 +110,7 @@ impl State {
             else {
                 unreachable!()
             };
-            byte_size += node_path_blob.blob.data.len();
+            byte_size += node_path_blob.blob.uncompressed_len;
             blobs.push(node_path_blob.blob);
             count += 1;
         }
@@ -126,7 +126,7 @@ impl State {
         for root_path_blob in root_path_blobs {
             let root_path_blob = root_path_blob?;
             let idx = all_root_path_blobs.len();
-            byte_size += root_path_blob.blob.data.len();
+            byte_size += root_path_blob.blob.uncompressed_len;
             all_root_path_blobs.push(LoadState::Unloaded((
                 root_path_blob.file_id.clone(),
                 root_path_blob.blob,
