@@ -58,6 +58,7 @@ impl<'state> Querier<'state> {
 
             debug!(" ↳ Found {}", pluralize(nodes.len(), "reference"));
 
+            cancellation_flag.check("before stitching")?;
             let mut all_paths = vec![];
             let config = StitcherConfig::default()
                 // Always detect similar paths: we don't know the language

@@ -1,9 +1,9 @@
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, time::Duration};
 
 use log::debug;
 use miette::Result;
 use smartstring::{LazyCompact, SmartString};
-use stack_graphs::{CancellationError, CancellationFlag};
+use stack_graphs::{CancelAfterDuration, CancellationError, CancellationFlag};
 
 use crate::{
     DataValue, Expr, FixedRule, FixedRulePayload, Poison, RegularTempStore, SourceSpan, Symbol,
@@ -160,6 +160,7 @@ impl FixedRule for StackGraphQuery {
                 |files| Box::new(files),
             ),
         )?;
+        let byte_size = state.byte_size as u64;
 
         debug!(" ↳ Initialized state for StackGraphQuery fixed rule");
 
@@ -224,7 +225,24 @@ impl FixedRule for StackGraphQuery {
         );
 
         let mut querier = Querier::new(&mut state);
-        let cancellation_flag = PoisonCancellation(poison);
+        let cancellation_flag = {
+            let mut cancellation_flags: Vec<Box<dyn CancellationFlag>> = vec![];
+
+            let poison_cancellation = PoisonCancellation(poison);
+            cancellation_flags.push(Box::new(poison_cancellation));
+
+            if timeout > 0 {
+                let timeout_cancellation = CancelAfterDuration::new(Duration::from_millis(timeout));
+                cancellation_flags.push(Box::new(timeout_cancellation));
+            }
+
+            if max_bytes > 0 && byte_size > max_bytes {
+                let out_of_memory_cancellation = Cancellation("binary blobs exceeded `max_bytes` memory limit");
+                cancellation_flags.push(Box::new(out_of_memory_cancellation))
+            }
+
+            CancellationFlagList(cancellation_flags)
+        };
 
         for resolution in
             querier.definitions(&source_poss, output_missing_files, &cancellation_flag)?
@@ -246,6 +264,23 @@ impl FixedRule for StackGraphQuery {
         debug!(" ↳ Finished running StackGraphQuery fixed rule");
 
         Ok(())
+    }
+}
+
+struct CancellationFlagList(Vec<Box<dyn CancellationFlag>>);
+impl CancellationFlag for CancellationFlagList {
+    fn check(&self, at: &'static str) -> Result<(), CancellationError> {
+        for cancellation in self.0.iter() {
+            cancellation.check(at)?;
+        }
+        Ok(())
+    }
+}
+
+pub struct Cancellation(&'static str);
+impl CancellationFlag for Cancellation {
+    fn check(&self, _at: &'static str) -> Result<(), CancellationError> {
+        Err(CancellationError(self.0))
     }
 }
 
