@@ -1,8 +1,9 @@
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, time::Duration};
 
 use log::debug;
 use miette::Result;
 use smartstring::{LazyCompact, SmartString};
+use stack_graphs::{CancelAfterDuration, CancellationError, CancellationFlag};
 
 use crate::{
     DataValue, Expr, FixedRule, FixedRulePayload, Poison, RegularTempStore, SourceSpan, Symbol,
@@ -132,29 +133,53 @@ impl FixedRule for StackGraphQuery {
             .iter()?
             .map(|tuple| tuple.map_err(E::tuple_report)?.try_into());
 
-        let root_path_blobs = payload.get_input(2)?
+        let root_path_blobs = payload
+            .get_input(2)?
             .ensure_min_len(3)?
             .iter()?
             .map(|tuple| tuple.map_err(E::tuple_report)?.try_into());
 
         let root_path_symbol_stacks_files =
             if let Ok(root_path_symbol_stacks_files) = payload.get_input(3) {
-                Some(root_path_symbol_stacks_files
-                    .ensure_min_len(2)?
-                    .iter()?
-                    .map(|tuple| tuple.map_err(E::tuple_report)?.try_into()))
+                Some(
+                    root_path_symbol_stacks_files
+                        .ensure_min_len(2)?
+                        .iter()?
+                        .map(|tuple| tuple.map_err(E::tuple_report)?.try_into()),
+                )
             } else {
                 None
             };
         let output_missing_files = root_path_symbol_stacks_files.is_some();
-        let mut state = state::State::new(graph_blobs, node_path_blobs, root_path_blobs,
+        let mut state = state::State::new(
+            graph_blobs,
+            node_path_blobs,
+            root_path_blobs,
             root_path_symbol_stacks_files.map_or_else::<Box<dyn Iterator<Item = _>>, _, _>(
                 || Box::new(std::iter::empty()),
                 |files| Box::new(files),
-            )
+            ),
         )?;
+        let byte_size = state.byte_size as u64;
 
         debug!(" ↳ Initialized state for StackGraphQuery fixed rule");
+
+        let timeout = payload
+            .expr_option("timeout", None)?
+            .eval_to_const()
+            .map_err(|e| Error::SourcePos(SourcePosError::Other(e)))?
+            .get_non_neg_int()
+            .ok_or(Error::SourcePos(SourcePosError::InvalidType {
+                expected: "list of timeout in milliseconds, or 0 if no timeout",
+            }))?;
+        let max_bytes = payload
+            .expr_option("max_bytes", None)?
+            .eval_to_const()
+            .map_err(|e| Error::SourcePos(SourcePosError::Other(e)))?
+            .get_non_neg_int()
+            .ok_or(Error::SourcePos(SourcePosError::InvalidType {
+                expected: "max amount of usable memory bytes",
+            }))?;
 
         let references = payload
             .expr_option("references", None)?
@@ -162,21 +187,33 @@ impl FixedRule for StackGraphQuery {
             .map_err(|e| Error::SourcePos(SourcePosError::Other(e)))?;
         let references = references
             .get_slice()
-            .ok_or(Error::SourcePos(SourcePosError::InvalidType { expected: "list of strings" }))?
+            .ok_or(Error::SourcePos(SourcePosError::InvalidType {
+                expected: "list of strings",
+            }))?
             .iter()
-            .map(|d| d.get_str()
-                .ok_or(Error::SourcePos(SourcePosError::InvalidType { expected: "string" })))
+            .map(|d| {
+                d.get_str()
+                    .ok_or(Error::SourcePos(SourcePosError::InvalidType {
+                        expected: "string",
+                    }))
+            })
             .collect::<Result<Vec<_>, _>>()?;
         let source_poss = references
             .into_iter()
-            .map(|s| s.parse::<SourcePos>()
-                .map_err(|e| Error::SourcePos(
-                    SourcePosError::Parse { got: s.into(), source: e })))
+            .map(|s| {
+                s.parse::<SourcePos>().map_err(|e| {
+                    Error::SourcePos(SourcePosError::Parse {
+                        got: s.into(),
+                        source: e,
+                    })
+                })
+            })
             .collect::<Result<Vec<_>, _>>()?;
 
-        let output_missing_files = output_missing_files && payload
-            .bool_option("output_missing_files", Some(true))
-            .map_err(|_| Error::OutputMissingFiles)?;
+        let output_missing_files = output_missing_files
+            && payload
+                .bool_option("output_missing_files", Some(true))
+                .map_err(|_| Error::OutputMissingFiles)?;
         debug!(
             " ↳ {}utputting missing files from StackGraphQuery fixed rule...",
             if output_missing_files { "O" } else { "Not o" },
@@ -188,11 +225,28 @@ impl FixedRule for StackGraphQuery {
         );
 
         let mut querier = Querier::new(&mut state);
-        for resolution in querier.definitions(
-            &source_poss,
-            output_missing_files,
-            &PoisonCancellation(poison),
-        )? {
+        let cancellation_flag = {
+            let mut cancellation_flags: Vec<Box<dyn CancellationFlag>> = vec![];
+
+            let poison_cancellation = PoisonCancellation(poison);
+            cancellation_flags.push(Box::new(poison_cancellation));
+
+            if timeout > 0 {
+                let timeout_cancellation = CancelAfterDuration::new(Duration::from_millis(timeout));
+                cancellation_flags.push(Box::new(timeout_cancellation));
+            }
+
+            if max_bytes > 0 && byte_size > max_bytes {
+                let out_of_memory_cancellation = Cancellation("binary blobs exceeded `max_bytes` memory limit");
+                cancellation_flags.push(Box::new(out_of_memory_cancellation))
+            }
+
+            CancellationFlagList(cancellation_flags)
+        };
+
+        for resolution in
+            querier.definitions(&source_poss, output_missing_files, &cancellation_flag)?
+        {
             match resolution.kind {
                 ResolutionKind::Definition(definition) => out.put(vec![
                     resolution.reference.to_string().into(),
@@ -213,13 +267,28 @@ impl FixedRule for StackGraphQuery {
     }
 }
 
+struct CancellationFlagList(Vec<Box<dyn CancellationFlag>>);
+impl CancellationFlag for CancellationFlagList {
+    fn check(&self, at: &'static str) -> Result<(), CancellationError> {
+        for cancellation in self.0.iter() {
+            cancellation.check(at)?;
+        }
+        Ok(())
+    }
+}
+
+pub struct Cancellation(&'static str);
+impl CancellationFlag for Cancellation {
+    fn check(&self, _at: &'static str) -> Result<(), CancellationError> {
+        Err(CancellationError(self.0))
+    }
+}
+
 struct PoisonCancellation(Poison);
 
-impl stack_graphs::CancellationFlag for PoisonCancellation {
-    fn check(&self, at: &'static str) -> Result<(), stack_graphs::CancellationError> {
-        self.0
-            .check()
-            .map_err(|_| stack_graphs::CancellationError(at))
+impl CancellationFlag for PoisonCancellation {
+    fn check(&self, at: &'static str) -> Result<(), CancellationError> {
+        self.0.check().map_err(|_| CancellationError(at))
     }
 }
 

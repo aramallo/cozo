@@ -17,8 +17,9 @@ use stack_graphs::{
 
 use super::{
     error::Result,
+    pluralize,
     tuples::{self, Blob},
-    pluralize, Error, SourcePos,
+    Error, SourcePos,
 };
 
 /// Optionally Zstd-compressed (see [`decompress_if_needed`]).
@@ -50,6 +51,7 @@ pub(super) struct State {
     db: Database,
     stats: Stats,
     pub(super) missing_files: Option<Vec<FileId>>,
+    pub(super) byte_size: usize,
 }
 
 enum LoadState<T> {
@@ -71,11 +73,10 @@ impl State {
         graph_blobs: impl Iterator<Item = Result<tuples::Graph>>,
         node_path_blobs: impl Iterator<Item = Result<tuples::NodePath>>,
         root_path_blobs: impl Iterator<Item = Result<tuples::RootPath>>,
-        root_path_symbol_stacks_files: impl Iterator<
-            Item = Result<tuples::RootPathSymbolStackFileId>,
-        >,
+        root_path_symbol_stacks_files: impl Iterator<Item = Result<tuples::RootPathSymbolStackFileId>>,
     ) -> Result<Self> {
         let graph = StackGraph::new();
+        let mut byte_size = 0;
 
         debug!("Indexing state...");
 
@@ -86,6 +87,7 @@ impl State {
             else {
                 return Err(Error::DuplicateGraph(graph_blob.file_id.into()));
             };
+            byte_size += graph_blob.blob.data.len();
             entry.insert(LoadState::Unloaded(graph_blob.blob));
         }
 
@@ -108,6 +110,7 @@ impl State {
             else {
                 unreachable!()
             };
+            byte_size += node_path_blob.blob.data.len();
             blobs.push(node_path_blob.blob);
             count += 1;
         }
@@ -123,6 +126,7 @@ impl State {
         for root_path_blob in root_path_blobs {
             let root_path_blob = root_path_blob?;
             let idx = all_root_path_blobs.len();
+            byte_size += root_path_blob.blob.data.len();
             all_root_path_blobs.push(LoadState::Unloaded((
                 root_path_blob.file_id.clone(),
                 root_path_blob.blob,
@@ -140,12 +144,14 @@ impl State {
 
         let mut root_path_symbol_stack_patterns_files_index = HashMap::new();
         for root_path_symbol_stack_file in root_path_symbol_stacks_files {
-            let tuples::RootPathSymbolStackFileId { root_path_symbol_stack, file_id }
-                = root_path_symbol_stack_file?;
+            let tuples::RootPathSymbolStackFileId {
+                root_path_symbol_stack,
+                file_id,
+            } = root_path_symbol_stack_file?;
 
-            for symbol_stack_pattern in PartialSymbolStackExt::key_patterns_from_storage_key(
-                &root_path_symbol_stack,
-            ) {
+            for symbol_stack_pattern in
+                PartialSymbolStackExt::key_patterns_from_storage_key(&root_path_symbol_stack)
+            {
                 root_path_symbol_stack_patterns_files_index
                     .entry(symbol_stack_pattern)
                     .or_insert_with(Vec::new)
@@ -170,6 +176,7 @@ impl State {
             db: Database::new(),
             stats: Stats::default(),
             missing_files: None,
+            byte_size,
         })
     }
 
@@ -367,13 +374,17 @@ impl State {
             );
 
             if let Some(missing_files) = self.missing_files.as_mut() {
-                if let Some(files) = self.root_path_symbol_stack_patterns_files_index
+                if let Some(files) = self
+                    .root_path_symbol_stack_patterns_files_index
                     .get(symbol_stack_pattern.as_str())
                 {
-                    missing_files.extend(files.iter()
-                        .filter(|file_id| !self.graph_blobs.contains_key(file_id.as_ref()))
-                        // TODO: Interning, instead of cloning?
-                        .cloned())
+                    missing_files.extend(
+                        files
+                            .iter()
+                            .filter(|file_id| !self.graph_blobs.contains_key(file_id.as_ref()))
+                            // TODO: Interning, instead of cloning?
+                            .cloned(),
+                    )
                 }
             }
 
