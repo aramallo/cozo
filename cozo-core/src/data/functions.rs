@@ -15,7 +15,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use base64::engine::general_purpose::STANDARD;
 use base64::Engine;
-use chrono::{DateTime, TimeZone, Utc};
+use chrono::{DateTime, Datelike, Duration, NaiveDate, TimeZone, Timelike, Utc, Weekday};
 use itertools::Itertools;
 #[cfg(target_arch = "wasm32")]
 use js_sys::Date;
@@ -2584,4 +2584,1341 @@ pub(crate) fn op_validity(args: &[DataValue]) -> Result<DataValue> {
         timestamp: ValidityTs(Reverse(ts)),
         is_assert: Reverse(is_assert),
     }))
+}
+
+define_op!(OP_TO_LOCAL_PARTS, 2, false);
+pub(crate) fn op_to_local_parts(args: &[DataValue]) -> Result<DataValue> {
+    let ts = args[0]
+        .get_float()
+        .ok_or_else(|| miette!("'to_local_parts' expects a number as first argument"))?;
+    let tz_str = args[1]
+        .get_str()
+        .ok_or_else(|| miette!("'to_local_parts' expects a timezone string as second argument"))?;
+
+    let tz = chrono_tz::Tz::from_str(tz_str)
+        .map_err(|_| miette!("Invalid timezone: {}", tz_str))?;
+
+    let dt = Utc.timestamp_opt(ts as i64, ((ts.fract() * 1_000_000_000.0) as u32))
+        .single()
+        .ok_or_else(|| miette!("Invalid timestamp"))?;
+    let dt_tz = dt.with_timezone(&tz);
+
+    let weekday = match dt_tz.weekday() {
+        Weekday::Mon => 1,
+        Weekday::Tue => 2,
+        Weekday::Wed => 3,
+        Weekday::Thu => 4,
+        Weekday::Fri => 5,
+        Weekday::Sat => 6,
+        Weekday::Sun => 7,
+    };
+
+    let result = json!({
+        "year": dt_tz.year(),
+        "month": dt_tz.month() as i32,
+        "day": dt_tz.day() as i32,
+        "hour": dt_tz.hour() as i32,
+        "minute": dt_tz.minute() as i32,
+        "second": dt_tz.second() as i32,
+        "dow": weekday,
+        "yday": dt_tz.ordinal() as i32,
+    });
+
+    Ok(DataValue::Json(JsonData(result)))
+}
+
+define_op!(OP_FROM_LOCAL_PARTS, 7, false);
+pub(crate) fn op_from_local_parts(args: &[DataValue]) -> Result<DataValue> {
+    let year = args[0]
+        .get_int()
+        .ok_or_else(|| miette!("'from_local_parts' expects year as integer"))?;
+    let month = args[1]
+        .get_int()
+        .ok_or_else(|| miette!("'from_local_parts' expects month as integer"))?;
+    let day = args[2]
+        .get_int()
+        .ok_or_else(|| miette!("'from_local_parts' expects day as integer"))?;
+    let hour = args[3]
+        .get_int()
+        .ok_or_else(|| miette!("'from_local_parts' expects hour as integer"))?;
+    let minute = args[4]
+        .get_int()
+        .ok_or_else(|| miette!("'from_local_parts' expects minute as integer"))?;
+    let second = args[5]
+        .get_int()
+        .ok_or_else(|| miette!("'from_local_parts' expects second as integer"))?;
+    let tz_str = args[6]
+        .get_str()
+        .ok_or_else(|| miette!("'from_local_parts' expects timezone string as last argument"))?;
+
+    let tz = chrono_tz::Tz::from_str(tz_str)
+        .map_err(|_| miette!("Invalid timezone: {}", tz_str))?;
+
+    let dt = tz.with_ymd_and_hms(year as i32, month as u32, day as u32, hour as u32, minute as u32, second as u32)
+        .single()
+        .ok_or_else(|| miette!("Invalid date/time parts"))?;
+
+    Ok(DataValue::from(dt.timestamp() as f64))
+}
+
+define_op!(OP_YEAR, 2, false);
+pub(crate) fn op_year(args: &[DataValue]) -> Result<DataValue> {
+    let ts = args[0]
+        .get_float()
+        .ok_or_else(|| miette!("'year' expects a number as first argument"))?;
+    let tz_str = args[1]
+        .get_str()
+        .ok_or_else(|| miette!("'year' expects a timezone string as second argument"))?;
+
+    let tz = chrono_tz::Tz::from_str(tz_str)
+        .map_err(|_| miette!("Invalid timezone: {}", tz_str))?;
+
+    let dt = Utc.timestamp_opt(ts as i64, ((ts.fract() * 1_000_000_000.0) as u32))
+        .single()
+        .ok_or_else(|| miette!("Invalid timestamp"))?;
+    let dt_tz = dt.with_timezone(&tz);
+
+    Ok(DataValue::from(dt_tz.year() as i64))
+}
+
+define_op!(OP_MONTH, 2, false);
+pub(crate) fn op_month(args: &[DataValue]) -> Result<DataValue> {
+    let ts = args[0]
+        .get_float()
+        .ok_or_else(|| miette!("'month' expects a number as first argument"))?;
+    let tz_str = args[1]
+        .get_str()
+        .ok_or_else(|| miette!("'month' expects a timezone string as second argument"))?;
+
+    let tz = chrono_tz::Tz::from_str(tz_str)
+        .map_err(|_| miette!("Invalid timezone: {}", tz_str))?;
+
+    let dt = Utc.timestamp_opt(ts as i64, ((ts.fract() * 1_000_000_000.0) as u32))
+        .single()
+        .ok_or_else(|| miette!("Invalid timestamp"))?;
+    let dt_tz = dt.with_timezone(&tz);
+
+    Ok(DataValue::from(dt_tz.month() as i64))
+}
+
+define_op!(OP_DAY, 2, false);
+pub(crate) fn op_day(args: &[DataValue]) -> Result<DataValue> {
+    let ts = args[0]
+        .get_float()
+        .ok_or_else(|| miette!("'day' expects a number as first argument"))?;
+    let tz_str = args[1]
+        .get_str()
+        .ok_or_else(|| miette!("'day' expects a timezone string as second argument"))?;
+
+    let tz = chrono_tz::Tz::from_str(tz_str)
+        .map_err(|_| miette!("Invalid timezone: {}", tz_str))?;
+
+    let dt = Utc.timestamp_opt(ts as i64, ((ts.fract() * 1_000_000_000.0) as u32))
+        .single()
+        .ok_or_else(|| miette!("Invalid timestamp"))?;
+    let dt_tz = dt.with_timezone(&tz);
+
+    Ok(DataValue::from(dt_tz.day() as i64))
+}
+
+define_op!(OP_DOW, 2, false);
+pub(crate) fn op_dow(args: &[DataValue]) -> Result<DataValue> {
+    let ts = args[0]
+        .get_float()
+        .ok_or_else(|| miette!("'dow' expects a number as first argument"))?;
+    let tz_str = args[1]
+        .get_str()
+        .ok_or_else(|| miette!("'dow' expects a timezone string as second argument"))?;
+
+    let tz = chrono_tz::Tz::from_str(tz_str)
+        .map_err(|_| miette!("Invalid timezone: {}", tz_str))?;
+
+    let dt = Utc.timestamp_opt(ts as i64, ((ts.fract() * 1_000_000_000.0) as u32))
+        .single()
+        .ok_or_else(|| miette!("Invalid timestamp"))?;
+    let dt_tz = dt.with_timezone(&tz);
+
+    let weekday = match dt_tz.weekday() {
+        Weekday::Mon => 1,
+        Weekday::Tue => 2,
+        Weekday::Wed => 3,
+        Weekday::Thu => 4,
+        Weekday::Fri => 5,
+        Weekday::Sat => 6,
+        Weekday::Sun => 7,
+    };
+
+    Ok(DataValue::from(weekday as i64))
+}
+
+define_op!(OP_HOUR, 2, false);
+pub(crate) fn op_hour(args: &[DataValue]) -> Result<DataValue> {
+    let ts = args[0]
+        .get_float()
+        .ok_or_else(|| miette!("'hour' expects a number as first argument"))?;
+    let tz_str = args[1]
+        .get_str()
+        .ok_or_else(|| miette!("'hour' expects a timezone string as second argument"))?;
+
+    let tz = chrono_tz::Tz::from_str(tz_str)
+        .map_err(|_| miette!("Invalid timezone: {}", tz_str))?;
+
+    let dt = Utc.timestamp_opt(ts as i64, ((ts.fract() * 1_000_000_000.0) as u32))
+        .single()
+        .ok_or_else(|| miette!("Invalid timestamp"))?;
+    let dt_tz = dt.with_timezone(&tz);
+
+    Ok(DataValue::from(dt_tz.hour() as i64))
+}
+
+define_op!(OP_MINUTE, 2, false);
+pub(crate) fn op_minute(args: &[DataValue]) -> Result<DataValue> {
+    let ts = args[0]
+        .get_float()
+        .ok_or_else(|| miette!("'minute' expects a number as first argument"))?;
+    let tz_str = args[1]
+        .get_str()
+        .ok_or_else(|| miette!("'minute' expects a timezone string as second argument"))?;
+
+    let tz = chrono_tz::Tz::from_str(tz_str)
+        .map_err(|_| miette!("Invalid timezone: {}", tz_str))?;
+
+    let dt = Utc.timestamp_opt(ts as i64, ((ts.fract() * 1_000_000_000.0) as u32))
+        .single()
+        .ok_or_else(|| miette!("Invalid timestamp"))?;
+    let dt_tz = dt.with_timezone(&tz);
+
+    Ok(DataValue::from(dt_tz.minute() as i64))
+}
+
+define_op!(OP_DAYS_IN_MONTH, 3, false);
+pub(crate) fn op_days_in_month(args: &[DataValue]) -> Result<DataValue> {
+    let year = args[0]
+        .get_int()
+        .ok_or_else(|| miette!("'days_in_month' expects year as integer"))?;
+    let month = args[1]
+        .get_int()
+        .ok_or_else(|| miette!("'days_in_month' expects month as integer"))?;
+    let _tz_str = args[2]
+        .get_str()
+        .ok_or_else(|| miette!("'days_in_month' expects timezone string as third argument"))?;
+
+    let days = match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 => {
+            let is_leap = (year % 4 == 0 && year % 100 != 0) || (year % 400 == 0);
+            if is_leap { 29 } else { 28 }
+        }
+        _ => bail!("Invalid month: {}", month),
+    };
+
+    Ok(DataValue::from(days as i64))
+}
+
+define_op!(OP_START_OF_DAY_LOCAL, 2, false);
+pub(crate) fn op_start_of_day_local(args: &[DataValue]) -> Result<DataValue> {
+    let ts = args[0]
+        .get_float()
+        .ok_or_else(|| miette!("'start_of_day_local' expects a number as first argument"))?;
+    let tz_str = args[1]
+        .get_str()
+        .ok_or_else(|| miette!("'start_of_day_local' expects a timezone string as second argument"))?;
+
+    let tz = chrono_tz::Tz::from_str(tz_str)
+        .map_err(|_| miette!("Invalid timezone: {}", tz_str))?;
+
+    let dt = Utc.timestamp_opt(ts as i64, ((ts.fract() * 1_000_000_000.0) as u32))
+        .single()
+        .ok_or_else(|| miette!("Invalid timestamp"))?;
+    let dt_tz = dt.with_timezone(&tz);
+
+    let start_of_day = dt_tz.date_naive().and_hms_opt(0, 0, 0)
+        .ok_or_else(|| miette!("Failed to create start of day"))?;
+    let start_dt = tz.from_local_datetime(&start_of_day)
+        .single()
+        .ok_or_else(|| miette!("Failed to convert to timezone"))?;
+
+    Ok(DataValue::from(start_dt.timestamp() as f64))
+}
+
+define_op!(OP_INTERVAL, 2, false);
+pub(crate) fn op_interval(args: &[DataValue]) -> Result<DataValue> {
+    let s = args[0]
+        .get_int()
+        .ok_or_else(|| miette!("'interval' expects start as integer"))?;
+    let e = args[1]
+        .get_int()
+        .ok_or_else(|| miette!("'interval' expects end as integer"))?;
+
+    if s >= e {
+        bail!("'interval' expects start < end, got {} >= {}", s, e);
+    }
+
+    Ok(DataValue::List(vec![DataValue::from(s), DataValue::from(e)]))
+}
+
+define_op!(OP_INTERVAL_LEN, 1, false);
+pub(crate) fn op_interval_len(args: &[DataValue]) -> Result<DataValue> {
+    let iv = args[0]
+        .get_slice()
+        .ok_or_else(|| miette!("'interval_len' expects an interval (list)"))?;
+
+    if iv.len() != 2 {
+        bail!("'interval_len' expects interval with exactly 2 elements");
+    }
+
+    let s = iv[0].get_int().ok_or_else(|| miette!("interval start must be integer"))?;
+    let e = iv[1].get_int().ok_or_else(|| miette!("interval end must be integer"))?;
+
+    Ok(DataValue::from(e - s))
+}
+
+define_op!(OP_INTERVAL_INTERSECTS, 2, false);
+pub(crate) fn op_interval_intersects(args: &[DataValue]) -> Result<DataValue> {
+    let a = args[0]
+        .get_slice()
+        .ok_or_else(|| miette!("'interval_intersects' expects first interval as list"))?;
+    let b = args[1]
+        .get_slice()
+        .ok_or_else(|| miette!("'interval_intersects' expects second interval as list"))?;
+
+    if a.len() != 2 || b.len() != 2 {
+        bail!("'interval_intersects' expects intervals with exactly 2 elements");
+    }
+
+    let as_ = a[0].get_int().ok_or_else(|| miette!("interval start must be integer"))?;
+    let ae = a[1].get_int().ok_or_else(|| miette!("interval end must be integer"))?;
+    let bs = b[0].get_int().ok_or_else(|| miette!("interval start must be integer"))?;
+    let be = b[1].get_int().ok_or_else(|| miette!("interval end must be integer"))?;
+
+    let intersects = as_ < be && bs < ae;
+    Ok(DataValue::from(intersects))
+}
+
+define_op!(OP_INTERVAL_OVERLAP, 2, false);
+pub(crate) fn op_interval_overlap(args: &[DataValue]) -> Result<DataValue> {
+    let a = args[0]
+        .get_slice()
+        .ok_or_else(|| miette!("'interval_overlap' expects first interval as list"))?;
+    let b = args[1]
+        .get_slice()
+        .ok_or_else(|| miette!("'interval_overlap' expects second interval as list"))?;
+
+    if a.len() != 2 || b.len() != 2 {
+        bail!("'interval_overlap' expects intervals with exactly 2 elements");
+    }
+
+    let as_ = a[0].get_int().ok_or_else(|| miette!("interval start must be integer"))?;
+    let ae = a[1].get_int().ok_or_else(|| miette!("interval end must be integer"))?;
+    let bs = b[0].get_int().ok_or_else(|| miette!("interval start must be integer"))?;
+    let be = b[1].get_int().ok_or_else(|| miette!("interval end must be integer"))?;
+
+    let s = as_.max(bs);
+    let e = ae.min(be);
+
+    if s < e {
+        Ok(DataValue::List(vec![DataValue::from(s), DataValue::from(e)]))
+    } else {
+        Ok(DataValue::Null)
+    }
+}
+
+define_op!(OP_INTERVAL_UNION, 2, false);
+pub(crate) fn op_interval_union(args: &[DataValue]) -> Result<DataValue> {
+    let a = args[0]
+        .get_slice()
+        .ok_or_else(|| miette!("'interval_union' expects first interval as list"))?;
+    let b = args[1]
+        .get_slice()
+        .ok_or_else(|| miette!("'interval_union' expects second interval as list"))?;
+
+    if a.len() != 2 || b.len() != 2 {
+        bail!("'interval_union' expects intervals with exactly 2 elements");
+    }
+
+    let as_ = a[0].get_int().ok_or_else(|| miette!("interval start must be integer"))?;
+    let ae = a[1].get_int().ok_or_else(|| miette!("interval end must be integer"))?;
+    let bs = b[0].get_int().ok_or_else(|| miette!("interval start must be integer"))?;
+    let be = b[1].get_int().ok_or_else(|| miette!("interval end must be integer"))?;
+
+    // Check if intervals are adjacent or overlapping
+    if ae >= bs && as_ <= be {
+        // Can merge into single interval
+        let s = as_.min(bs);
+        let e = ae.max(be);
+        Ok(DataValue::List(vec![
+            DataValue::List(vec![DataValue::from(s), DataValue::from(e)])
+        ]))
+    } else {
+        // Return two separate intervals, sorted
+        if as_ < bs {
+            Ok(DataValue::List(vec![
+                DataValue::List(vec![DataValue::from(as_), DataValue::from(ae)]),
+                DataValue::List(vec![DataValue::from(bs), DataValue::from(be)])
+            ]))
+        } else {
+            Ok(DataValue::List(vec![
+                DataValue::List(vec![DataValue::from(bs), DataValue::from(be)]),
+                DataValue::List(vec![DataValue::from(as_), DataValue::from(ae)])
+            ]))
+        }
+    }
+}
+
+define_op!(OP_INTERVAL_MINUS, 2, false);
+pub(crate) fn op_interval_minus(args: &[DataValue]) -> Result<DataValue> {
+    let a = args[0]
+        .get_slice()
+        .ok_or_else(|| miette!("'interval_minus' expects first interval as list"))?;
+    let b = args[1]
+        .get_slice()
+        .ok_or_else(|| miette!("'interval_minus' expects second interval as list"))?;
+
+    if a.len() != 2 || b.len() != 2 {
+        bail!("'interval_minus' expects intervals with exactly 2 elements");
+    }
+
+    let as_ = a[0].get_int().ok_or_else(|| miette!("interval start must be integer"))?;
+    let ae = a[1].get_int().ok_or_else(|| miette!("interval end must be integer"))?;
+    let bs = b[0].get_int().ok_or_else(|| miette!("interval start must be integer"))?;
+    let be = b[1].get_int().ok_or_else(|| miette!("interval end must be integer"))?;
+
+    // No intersection, return original interval
+    if ae <= bs || be <= as_ {
+        Ok(DataValue::List(vec![
+            DataValue::List(vec![DataValue::from(as_), DataValue::from(ae)])
+        ]))
+    }
+    // b completely contains a
+    else if bs <= as_ && be >= ae {
+        Ok(DataValue::List(vec![]))
+    }
+    // b cuts from the left
+    else if bs <= as_ && be < ae {
+        Ok(DataValue::List(vec![
+            DataValue::List(vec![DataValue::from(be), DataValue::from(ae)])
+        ]))
+    }
+    // b cuts from the right
+    else if bs > as_ && be >= ae {
+        Ok(DataValue::List(vec![
+            DataValue::List(vec![DataValue::from(as_), DataValue::from(bs)])
+        ]))
+    }
+    // b cuts in the middle
+    else {
+        Ok(DataValue::List(vec![
+            DataValue::List(vec![DataValue::from(as_), DataValue::from(bs)]),
+            DataValue::List(vec![DataValue::from(be), DataValue::from(ae)])
+        ]))
+    }
+}
+
+define_op!(OP_INTERVAL_ADJACENT, 2, false);
+pub(crate) fn op_interval_adjacent(args: &[DataValue]) -> Result<DataValue> {
+    let a = args[0]
+        .get_slice()
+        .ok_or_else(|| miette!("'interval_adjacent' expects first interval as list"))?;
+    let b = args[1]
+        .get_slice()
+        .ok_or_else(|| miette!("'interval_adjacent' expects second interval as list"))?;
+
+    if a.len() != 2 || b.len() != 2 {
+        bail!("'interval_adjacent' expects intervals with exactly 2 elements");
+    }
+
+    let as_ = a[0].get_int().ok_or_else(|| miette!("interval start must be integer"))?;
+    let ae = a[1].get_int().ok_or_else(|| miette!("interval end must be integer"))?;
+    let bs = b[0].get_int().ok_or_else(|| miette!("interval start must be integer"))?;
+    let be = b[1].get_int().ok_or_else(|| miette!("interval end must be integer"))?;
+
+    let adjacent = ae == bs || be == as_;
+    Ok(DataValue::from(adjacent))
+}
+
+define_op!(OP_INTERVAL_MERGE_ADJACENT, 1, false);
+pub(crate) fn op_interval_merge_adjacent(args: &[DataValue]) -> Result<DataValue> {
+    let intervals = args[0]
+        .get_slice()
+        .ok_or_else(|| miette!("'interval_merge_adjacent' expects a list of intervals"))?;
+
+    if intervals.is_empty() {
+        return Ok(DataValue::List(vec![]));
+    }
+
+    // Extract and validate all intervals
+    let mut ivs: Vec<(i64, i64)> = vec![];
+    for iv in intervals {
+        let iv_list = iv.get_slice()
+            .ok_or_else(|| miette!("each element must be an interval (list)"))?;
+        if iv_list.len() != 2 {
+            bail!("each interval must have exactly 2 elements");
+        }
+        let s = iv_list[0].get_int()
+            .ok_or_else(|| miette!("interval start must be integer"))?;
+        let e = iv_list[1].get_int()
+            .ok_or_else(|| miette!("interval end must be integer"))?;
+        ivs.push((s, e));
+    }
+
+    // Sort by start time
+    ivs.sort_by_key(|&(s, _)| s);
+
+    // Merge adjacent/overlapping intervals
+    let mut result = vec![];
+    let mut current = ivs[0];
+
+    for &(s, e) in &ivs[1..] {
+        if current.1 >= s {
+            // Adjacent or overlapping - merge
+            current.1 = current.1.max(e);
+        } else {
+            // Not adjacent - save current and start new
+            result.push(DataValue::List(vec![
+                DataValue::from(current.0),
+                DataValue::from(current.1)
+            ]));
+            current = (s, e);
+        }
+    }
+
+    // Add the last interval
+    result.push(DataValue::List(vec![
+        DataValue::from(current.0),
+        DataValue::from(current.1)
+    ]));
+
+    Ok(DataValue::List(result))
+}
+
+define_op!(OP_INTERVAL_SHIFT, 2, false);
+pub(crate) fn op_interval_shift(args: &[DataValue]) -> Result<DataValue> {
+    let iv = args[0]
+        .get_slice()
+        .ok_or_else(|| miette!("'interval_shift' expects an interval (list)"))?;
+    let d = args[1]
+        .get_int()
+        .ok_or_else(|| miette!("'interval_shift' expects shift amount as integer"))?;
+
+    if iv.len() != 2 {
+        bail!("'interval_shift' expects interval with exactly 2 elements");
+    }
+
+    let s = iv[0].get_int().ok_or_else(|| miette!("interval start must be integer"))?;
+    let e = iv[1].get_int().ok_or_else(|| miette!("interval end must be integer"))?;
+
+    Ok(DataValue::List(vec![
+        DataValue::from(s + d),
+        DataValue::from(e + d)
+    ]))
+}
+
+define_op!(OP_INTERVAL_CONTAINS, 2, false);
+pub(crate) fn op_interval_contains(args: &[DataValue]) -> Result<DataValue> {
+    let iv = args[0]
+        .get_slice()
+        .ok_or_else(|| miette!("'interval_contains' expects an interval (list)"))?;
+    let t = args[1]
+        .get_int()
+        .ok_or_else(|| miette!("'interval_contains' expects time as integer"))?;
+
+    if iv.len() != 2 {
+        bail!("'interval_contains' expects interval with exactly 2 elements");
+    }
+
+    let s = iv[0].get_int().ok_or_else(|| miette!("interval start must be integer"))?;
+    let e = iv[1].get_int().ok_or_else(|| miette!("interval end must be integer"))?;
+
+    Ok(DataValue::from(s <= t && t < e))
+}
+
+define_op!(OP_INTERVAL_CONTAINS_INTERVAL, 2, false);
+pub(crate) fn op_interval_contains_interval(args: &[DataValue]) -> Result<DataValue> {
+    let a = args[0]
+        .get_slice()
+        .ok_or_else(|| miette!("'interval_contains_interval' expects first interval as list"))?;
+    let b = args[1]
+        .get_slice()
+        .ok_or_else(|| miette!("'interval_contains_interval' expects second interval as list"))?;
+
+    if a.len() != 2 || b.len() != 2 {
+        bail!("'interval_contains_interval' expects intervals with exactly 2 elements");
+    }
+
+    let as_ = a[0].get_int().ok_or_else(|| miette!("interval start must be integer"))?;
+    let ae = a[1].get_int().ok_or_else(|| miette!("interval end must be integer"))?;
+    let bs = b[0].get_int().ok_or_else(|| miette!("interval start must be integer"))?;
+    let be = b[1].get_int().ok_or_else(|| miette!("interval end must be integer"))?;
+
+    Ok(DataValue::from(as_ <= bs && be <= ae))
+}
+
+define_op!(OP_ALLEN_BEFORE, 2, false);
+pub(crate) fn op_allen_before(args: &[DataValue]) -> Result<DataValue> {
+    let a = args[0]
+        .get_slice()
+        .ok_or_else(|| miette!("'allen_before' expects first interval as list"))?;
+    let b = args[1]
+        .get_slice()
+        .ok_or_else(|| miette!("'allen_before' expects second interval as list"))?;
+
+    if a.len() != 2 || b.len() != 2 {
+        bail!("'allen_before' expects intervals with exactly 2 elements");
+    }
+
+    let ae = a[1].get_int().ok_or_else(|| miette!("interval end must be integer"))?;
+    let bs = b[0].get_int().ok_or_else(|| miette!("interval start must be integer"))?;
+
+    Ok(DataValue::from(ae < bs))
+}
+
+define_op!(OP_ALLEN_MEETS, 2, false);
+pub(crate) fn op_allen_meets(args: &[DataValue]) -> Result<DataValue> {
+    let a = args[0]
+        .get_slice()
+        .ok_or_else(|| miette!("'allen_meets' expects first interval as list"))?;
+    let b = args[1]
+        .get_slice()
+        .ok_or_else(|| miette!("'allen_meets' expects second interval as list"))?;
+
+    if a.len() != 2 || b.len() != 2 {
+        bail!("'allen_meets' expects intervals with exactly 2 elements");
+    }
+
+    let ae = a[1].get_int().ok_or_else(|| miette!("interval end must be integer"))?;
+    let bs = b[0].get_int().ok_or_else(|| miette!("interval start must be integer"))?;
+
+    Ok(DataValue::from(ae == bs))
+}
+
+define_op!(OP_ALLEN_OVERLAPS, 2, false);
+pub(crate) fn op_allen_overlaps(args: &[DataValue]) -> Result<DataValue> {
+    let a = args[0]
+        .get_slice()
+        .ok_or_else(|| miette!("'allen_overlaps' expects first interval as list"))?;
+    let b = args[1]
+        .get_slice()
+        .ok_or_else(|| miette!("'allen_overlaps' expects second interval as list"))?;
+
+    if a.len() != 2 || b.len() != 2 {
+        bail!("'allen_overlaps' expects intervals with exactly 2 elements");
+    }
+
+    let as_ = a[0].get_int().ok_or_else(|| miette!("interval start must be integer"))?;
+    let ae = a[1].get_int().ok_or_else(|| miette!("interval end must be integer"))?;
+    let bs = b[0].get_int().ok_or_else(|| miette!("interval start must be integer"))?;
+    let be = b[1].get_int().ok_or_else(|| miette!("interval end must be integer"))?;
+
+    Ok(DataValue::from(as_ < bs && bs < ae && ae < be))
+}
+
+define_op!(OP_ALLEN_STARTS, 2, false);
+pub(crate) fn op_allen_starts(args: &[DataValue]) -> Result<DataValue> {
+    let a = args[0]
+        .get_slice()
+        .ok_or_else(|| miette!("'allen_starts' expects first interval as list"))?;
+    let b = args[1]
+        .get_slice()
+        .ok_or_else(|| miette!("'allen_starts' expects second interval as list"))?;
+
+    if a.len() != 2 || b.len() != 2 {
+        bail!("'allen_starts' expects intervals with exactly 2 elements");
+    }
+
+    let as_ = a[0].get_int().ok_or_else(|| miette!("interval start must be integer"))?;
+    let ae = a[1].get_int().ok_or_else(|| miette!("interval end must be integer"))?;
+    let bs = b[0].get_int().ok_or_else(|| miette!("interval start must be integer"))?;
+    let be = b[1].get_int().ok_or_else(|| miette!("interval end must be integer"))?;
+
+    Ok(DataValue::from(as_ == bs && ae < be))
+}
+
+define_op!(OP_ALLEN_DURING, 2, false);
+pub(crate) fn op_allen_during(args: &[DataValue]) -> Result<DataValue> {
+    let a = args[0]
+        .get_slice()
+        .ok_or_else(|| miette!("'allen_during' expects first interval as list"))?;
+    let b = args[1]
+        .get_slice()
+        .ok_or_else(|| miette!("'allen_during' expects second interval as list"))?;
+
+    if a.len() != 2 || b.len() != 2 {
+        bail!("'allen_during' expects intervals with exactly 2 elements");
+    }
+
+    let as_ = a[0].get_int().ok_or_else(|| miette!("interval start must be integer"))?;
+    let ae = a[1].get_int().ok_or_else(|| miette!("interval end must be integer"))?;
+    let bs = b[0].get_int().ok_or_else(|| miette!("interval start must be integer"))?;
+    let be = b[1].get_int().ok_or_else(|| miette!("interval end must be integer"))?;
+
+    Ok(DataValue::from(bs < as_ && ae < be))
+}
+
+define_op!(OP_ALLEN_FINISHES, 2, false);
+pub(crate) fn op_allen_finishes(args: &[DataValue]) -> Result<DataValue> {
+    let a = args[0]
+        .get_slice()
+        .ok_or_else(|| miette!("'allen_finishes' expects first interval as list"))?;
+    let b = args[1]
+        .get_slice()
+        .ok_or_else(|| miette!("'allen_finishes' expects second interval as list"))?;
+
+    if a.len() != 2 || b.len() != 2 {
+        bail!("'allen_finishes' expects intervals with exactly 2 elements");
+    }
+
+    let as_ = a[0].get_int().ok_or_else(|| miette!("interval start must be integer"))?;
+    let ae = a[1].get_int().ok_or_else(|| miette!("interval end must be integer"))?;
+    let bs = b[0].get_int().ok_or_else(|| miette!("interval start must be integer"))?;
+    let be = b[1].get_int().ok_or_else(|| miette!("interval end must be integer"))?;
+
+    Ok(DataValue::from(as_ > bs && ae == be))
+}
+
+define_op!(OP_ALLEN_EQUALS, 2, false);
+pub(crate) fn op_allen_equals(args: &[DataValue]) -> Result<DataValue> {
+    let a = args[0]
+        .get_slice()
+        .ok_or_else(|| miette!("'allen_equals' expects first interval as list"))?;
+    let b = args[1]
+        .get_slice()
+        .ok_or_else(|| miette!("'allen_equals' expects second interval as list"))?;
+
+    if a.len() != 2 || b.len() != 2 {
+        bail!("'allen_equals' expects intervals with exactly 2 elements");
+    }
+
+    let as_ = a[0].get_int().ok_or_else(|| miette!("interval start must be integer"))?;
+    let ae = a[1].get_int().ok_or_else(|| miette!("interval end must be integer"))?;
+    let bs = b[0].get_int().ok_or_else(|| miette!("interval start must be integer"))?;
+    let be = b[1].get_int().ok_or_else(|| miette!("interval end must be integer"))?;
+
+    Ok(DataValue::from(as_ == bs && ae == be))
+}
+
+define_op!(OP_ALLEN_AFTER, 2, false);
+pub(crate) fn op_allen_after(args: &[DataValue]) -> Result<DataValue> {
+    // a after b is equivalent to b before a
+    op_allen_before(&[args[1].clone(), args[0].clone()])
+}
+
+define_op!(OP_ALLEN_MET_BY, 2, false);
+pub(crate) fn op_allen_met_by(args: &[DataValue]) -> Result<DataValue> {
+    // a met by b is equivalent to b meets a
+    op_allen_meets(&[args[1].clone(), args[0].clone()])
+}
+
+define_op!(OP_ALLEN_OVERLAPPED_BY, 2, false);
+pub(crate) fn op_allen_overlapped_by(args: &[DataValue]) -> Result<DataValue> {
+    // a overlapped by b is equivalent to b overlaps a
+    op_allen_overlaps(&[args[1].clone(), args[0].clone()])
+}
+
+define_op!(OP_ALLEN_STARTED_BY, 2, false);
+pub(crate) fn op_allen_started_by(args: &[DataValue]) -> Result<DataValue> {
+    // a started by b is equivalent to b starts a
+    op_allen_starts(&[args[1].clone(), args[0].clone()])
+}
+
+define_op!(OP_ALLEN_CONTAINS, 2, false);
+pub(crate) fn op_allen_contains(args: &[DataValue]) -> Result<DataValue> {
+    // a contains b is equivalent to b during a
+    op_allen_during(&[args[1].clone(), args[0].clone()])
+}
+
+define_op!(OP_ALLEN_FINISHED_BY, 2, false);
+pub(crate) fn op_allen_finished_by(args: &[DataValue]) -> Result<DataValue> {
+    // a finished by b is equivalent to b finishes a
+    op_allen_finishes(&[args[1].clone(), args[0].clone()])
+}
+
+define_op!(OP_EXPAND_WEEKLY_DAYS, 6, false);
+pub(crate) fn op_expand_weekly_days(args: &[DataValue]) -> Result<DataValue> {
+    let h0 = args[0]
+        .get_int()
+        .ok_or_else(|| miette!("'expand_weekly_days' expects start hour as integer"))?;
+    let h1 = args[1]
+        .get_int()
+        .ok_or_else(|| miette!("'expand_weekly_days' expects end hour as integer"))?;
+
+    let by_wday_slice = args[2]
+        .get_slice()
+        .ok_or_else(|| miette!("'expand_weekly_days' expects by_wday as list"))?;
+    let by_wday: Result<Vec<i64>, _> = by_wday_slice.iter()
+        .map(|v| v.get_int().ok_or_else(|| miette!("weekday must be integer")))
+        .collect();
+    let by_wday = by_wday?;
+
+    let tz_str = args[3]
+        .get_str()
+        .ok_or_else(|| miette!("'expand_weekly_days' expects timezone string"))?;
+    let start_min = args[4]
+        .get_int()
+        .ok_or_else(|| miette!("'expand_weekly_days' expects start_min as integer"))?;
+    let end_min = args[5]
+        .get_int()
+        .ok_or_else(|| miette!("'expand_weekly_days' expects end_min as integer"))?;
+
+    let tz = chrono_tz::Tz::from_str(tz_str)
+        .map_err(|_| miette!("Invalid timezone: {}", tz_str))?;
+
+    // Convert hour range to UTC timestamps for a sample week
+    let base_date = NaiveDate::from_ymd_opt(2024, 1, 1) // Start of week (Monday)
+        .ok_or_else(|| miette!("Failed to create base date"))?;
+
+    let mut intervals = Vec::new();
+
+    // Process each requested weekday
+    for &wday in &by_wday {
+        if wday < 1 || wday > 7 {
+            bail!("Weekday must be 1-7, got {}", wday);
+        }
+
+        // Calculate date for this weekday (wday 1 = Monday, 7 = Sunday)
+        let days_from_monday = if wday == 7 { 6 } else { wday - 1 };
+        let target_date = base_date + Duration::days(days_from_monday);
+
+        // Create start time
+        let start_dt = target_date.and_hms_opt(h0 as u32, start_min as u32, 0)
+            .ok_or_else(|| miette!("Invalid start time"))?;
+        let start_utc = tz.from_local_datetime(&start_dt)
+            .single()
+            .ok_or_else(|| miette!("Ambiguous start time in timezone"))?;
+
+        // Create end time
+        let end_dt = target_date.and_hms_opt(h1 as u32, end_min as u32, 0)
+            .ok_or_else(|| miette!("Invalid end time"))?;
+        let end_utc = tz.from_local_datetime(&end_dt)
+            .single()
+            .ok_or_else(|| miette!("Ambiguous end time in timezone"))?;
+
+        intervals.push(DataValue::List(vec![
+            DataValue::from(start_utc.timestamp()),
+            DataValue::from(end_utc.timestamp())
+        ]));
+    }
+
+    Ok(DataValue::List(intervals))
+}
+
+define_op!(OP_EXPAND_MONTHLY_SETPOS, 7, false);
+pub(crate) fn op_expand_monthly_setpos(args: &[DataValue]) -> Result<DataValue> {
+    let h0 = args[0]
+        .get_int()
+        .ok_or_else(|| miette!("'expand_monthly_setpos' expects start hour as integer"))?;
+    let h1 = args[1]
+        .get_int()
+        .ok_or_else(|| miette!("'expand_monthly_setpos' expects end hour as integer"))?;
+
+    let by_wday_slice = args[2]
+        .get_slice()
+        .ok_or_else(|| miette!("'expand_monthly_setpos' expects by_wday as list"))?;
+    let by_wday: Result<Vec<i64>, _> = by_wday_slice.iter()
+        .map(|v| v.get_int().ok_or_else(|| miette!("weekday must be integer")))
+        .collect();
+    let by_wday = by_wday?;
+
+    let by_setpos_slice = args[3]
+        .get_slice()
+        .ok_or_else(|| miette!("'expand_monthly_setpos' expects by_setpos as list"))?;
+    let by_setpos: Result<Vec<i64>, _> = by_setpos_slice.iter()
+        .map(|v| v.get_int().ok_or_else(|| miette!("setpos must be integer")))
+        .collect();
+    let by_setpos = by_setpos?;
+
+    let tz_str = args[4]
+        .get_str()
+        .ok_or_else(|| miette!("'expand_monthly_setpos' expects timezone string"))?;
+    let start_min = args[5]
+        .get_int()
+        .ok_or_else(|| miette!("'expand_monthly_setpos' expects start_min as integer"))?;
+    let end_min = args[6]
+        .get_int()
+        .ok_or_else(|| miette!("'expand_monthly_setpos' expects end_min as integer"))?;
+
+    let tz = chrono_tz::Tz::from_str(tz_str)
+        .map_err(|_| miette!("Invalid timezone: {}", tz_str))?;
+
+    // For a sample month (January 2024)
+    let year = 2024;
+    let month = 1;
+    let mut intervals = Vec::new();
+
+    // Find all occurrences of the specified weekdays in the month
+    let first_day = NaiveDate::from_ymd_opt(year, month, 1)
+        .ok_or_else(|| miette!("Failed to create first day of month"))?;
+    let last_day = if month == 12 {
+        NaiveDate::from_ymd_opt(year + 1, 1, 1)
+    } else {
+        NaiveDate::from_ymd_opt(year, month + 1, 1)
+    }.ok_or_else(|| miette!("Failed to create last day of month"))?
+    .pred_opt()
+    .ok_or_else(|| miette!("Failed to get previous day"))?;
+
+    for &wday in &by_wday {
+        if wday < 1 || wday > 7 {
+            bail!("Weekday must be 1-7, got {}", wday);
+        }
+
+        // Find all dates in the month that match this weekday
+        let mut matching_dates = Vec::new();
+        let mut current_date = first_day;
+
+        while current_date <= last_day {
+            let current_wday = match current_date.weekday() {
+                Weekday::Mon => 1,
+                Weekday::Tue => 2,
+                Weekday::Wed => 3,
+                Weekday::Thu => 4,
+                Weekday::Fri => 5,
+                Weekday::Sat => 6,
+                Weekday::Sun => 7,
+            };
+
+            if current_wday == wday {
+                matching_dates.push(current_date);
+            }
+
+            current_date = current_date.succ_opt()
+                .ok_or_else(|| miette!("Failed to increment date"))?;
+        }
+
+        // Apply setpos filtering
+        for &setpos in &by_setpos {
+            let date_opt = if setpos > 0 {
+                matching_dates.get((setpos - 1) as usize)
+            } else if setpos < 0 {
+                let idx = (matching_dates.len() as i64 + setpos) as usize;
+                matching_dates.get(idx)
+            } else {
+                bail!("Setpos cannot be 0");
+            };
+
+            if let Some(date) = date_opt {
+                // Create start time
+                let start_dt = date.and_hms_opt(h0 as u32, start_min as u32, 0)
+                    .ok_or_else(|| miette!("Invalid start time"))?;
+                let start_utc = tz.from_local_datetime(&start_dt)
+                    .single()
+                    .ok_or_else(|| miette!("Ambiguous start time in timezone"))?;
+
+                // Create end time
+                let end_dt = date.and_hms_opt(h1 as u32, end_min as u32, 0)
+                    .ok_or_else(|| miette!("Invalid end time"))?;
+                let end_utc = tz.from_local_datetime(&end_dt)
+                    .single()
+                    .ok_or_else(|| miette!("Ambiguous end time in timezone"))?;
+
+                intervals.push(DataValue::List(vec![
+                    DataValue::from(start_utc.timestamp()),
+                    DataValue::from(end_utc.timestamp())
+                ]));
+            }
+        }
+    }
+
+    Ok(DataValue::List(intervals))
+}
+
+define_op!(OP_NORMALIZE_INTERVALS, 1, false);
+pub(crate) fn op_normalize_intervals(args: &[DataValue]) -> Result<DataValue> {
+    let intervals = args[0]
+        .get_slice()
+        .ok_or_else(|| miette!("'normalize_intervals' expects a list of intervals"))?;
+
+    if intervals.is_empty() {
+        return Ok(DataValue::List(vec![]));
+    }
+
+    // Extract and validate all intervals
+    let mut ivs: Vec<(i64, i64)> = vec![];
+    for iv in intervals {
+        let iv_list = iv.get_slice()
+            .ok_or_else(|| miette!("each element must be an interval (list)"))?;
+        if iv_list.len() != 2 {
+            bail!("each interval must have exactly 2 elements");
+        }
+        let s = iv_list[0].get_int()
+            .ok_or_else(|| miette!("interval start must be integer"))?;
+        let e = iv_list[1].get_int()
+            .ok_or_else(|| miette!("interval end must be integer"))?;
+        if s < e {
+            ivs.push((s, e));
+        }
+    }
+
+    if ivs.is_empty() {
+        return Ok(DataValue::List(vec![]));
+    }
+
+    // Sort by start time
+    ivs.sort_by_key(|&(s, _)| s);
+
+    // Merge overlapping and adjacent intervals
+    let mut result = vec![];
+    let mut current = ivs[0];
+
+    for &(s, e) in &ivs[1..] {
+        if current.1 >= s {
+            // Overlapping or adjacent - merge
+            current.1 = current.1.max(e);
+        } else {
+            // Not overlapping - save current and start new
+            result.push(DataValue::List(vec![
+                DataValue::from(current.0),
+                DataValue::from(current.1)
+            ]));
+            current = (s, e);
+        }
+    }
+
+    // Add the last interval
+    result.push(DataValue::List(vec![
+        DataValue::from(current.0),
+        DataValue::from(current.1)
+    ]));
+
+    Ok(DataValue::List(result))
+}
+
+define_op!(OP_INTERVALS_MINUS, 2, false);
+pub(crate) fn op_intervals_minus(args: &[DataValue]) -> Result<DataValue> {
+    let intervals = args[0]
+        .get_slice()
+        .ok_or_else(|| miette!("'intervals_minus' expects first argument as list of intervals"))?;
+    let subs = args[1]
+        .get_slice()
+        .ok_or_else(|| miette!("'intervals_minus' expects second argument as list of intervals"))?;
+
+    // Parse input intervals
+    let mut ivs: Vec<(i64, i64)> = vec![];
+    for iv in intervals {
+        let iv_list = iv.get_slice()
+            .ok_or_else(|| miette!("each element must be an interval (list)"))?;
+        if iv_list.len() != 2 {
+            bail!("each interval must have exactly 2 elements");
+        }
+        let s = iv_list[0].get_int()
+            .ok_or_else(|| miette!("interval start must be integer"))?;
+        let e = iv_list[1].get_int()
+            .ok_or_else(|| miette!("interval end must be integer"))?;
+        if s < e {
+            ivs.push((s, e));
+        }
+    }
+
+    // Parse subtraction intervals
+    let mut sub_ivs: Vec<(i64, i64)> = vec![];
+    for iv in subs {
+        let iv_list = iv.get_slice()
+            .ok_or_else(|| miette!("each element must be an interval (list)"))?;
+        if iv_list.len() != 2 {
+            bail!("each interval must have exactly 2 elements");
+        }
+        let s = iv_list[0].get_int()
+            .ok_or_else(|| miette!("interval start must be integer"))?;
+        let e = iv_list[1].get_int()
+            .ok_or_else(|| miette!("interval end must be integer"))?;
+        if s < e {
+            sub_ivs.push((s, e));
+        }
+    }
+
+    // Apply all subtractions
+    let mut result_ivs = ivs;
+    for (sub_s, sub_e) in sub_ivs {
+        let mut new_result = Vec::new();
+        for (iv_s, iv_e) in result_ivs {
+            // Subtract sub from iv
+            if sub_e <= iv_s || sub_s >= iv_e {
+                // No intersection
+                new_result.push((iv_s, iv_e));
+            } else if sub_s <= iv_s && sub_e >= iv_e {
+                // Sub completely contains iv - remove iv
+            } else if sub_s <= iv_s && sub_e < iv_e {
+                // Sub cuts from the left
+                new_result.push((sub_e, iv_e));
+            } else if sub_s > iv_s && sub_e >= iv_e {
+                // Sub cuts from the right
+                new_result.push((iv_s, sub_s));
+            } else {
+                // Sub cuts in the middle
+                new_result.push((iv_s, sub_s));
+                new_result.push((sub_e, iv_e));
+            }
+        }
+        result_ivs = new_result;
+    }
+
+    // Convert back to DataValue format
+    let result: Vec<DataValue> = result_ivs.into_iter()
+        .map(|(s, e)| DataValue::List(vec![DataValue::from(s), DataValue::from(e)]))
+        .collect();
+
+    Ok(DataValue::List(result))
+}
+
+define_op!(OP_NTH_WEEKDAY_OF_MONTH, 5, false);
+pub(crate) fn op_nth_weekday_of_month(args: &[DataValue]) -> Result<DataValue> {
+    let year = args[0]
+        .get_int()
+        .ok_or_else(|| miette!("'nth_weekday_of_month' expects year as integer"))?;
+    let month = args[1]
+        .get_int()
+        .ok_or_else(|| miette!("'nth_weekday_of_month' expects month as integer"))?;
+    let weekday = args[2]
+        .get_int()
+        .ok_or_else(|| miette!("'nth_weekday_of_month' expects weekday as integer"))?;
+    let n = args[3]
+        .get_int()
+        .ok_or_else(|| miette!("'nth_weekday_of_month' expects n as integer"))?;
+    let _tz_str = args[4]
+        .get_str()
+        .ok_or_else(|| miette!("'nth_weekday_of_month' expects timezone string"))?;
+
+    if weekday < 1 || weekday > 7 {
+        bail!("Weekday must be 1-7, got {}", weekday);
+    }
+    if n == 0 {
+        bail!("n cannot be 0");
+    }
+    if n < -5 || n > 5 {
+        bail!("n must be ±1..±5, got {}", n);
+    }
+
+    // Create first and last day of month
+    let first_day = NaiveDate::from_ymd_opt(year as i32, month as u32, 1)
+        .ok_or_else(|| miette!("Invalid year/month: {}/{}", year, month))?;
+    let last_day = if month == 12 {
+        NaiveDate::from_ymd_opt((year + 1) as i32, 1, 1)
+    } else {
+        NaiveDate::from_ymd_opt(year as i32, (month + 1) as u32, 1)
+    }.ok_or_else(|| miette!("Failed to create end of month"))?
+    .pred_opt()
+    .ok_or_else(|| miette!("Failed to get previous day"))?;
+
+    // Find all dates in the month that match this weekday
+    let mut matching_dates = Vec::new();
+    let mut current_date = first_day;
+
+    while current_date <= last_day {
+        let current_wday = match current_date.weekday() {
+            Weekday::Mon => 1,
+            Weekday::Tue => 2,
+            Weekday::Wed => 3,
+            Weekday::Thu => 4,
+            Weekday::Fri => 5,
+            Weekday::Sat => 6,
+            Weekday::Sun => 7,
+        };
+
+        if current_wday == weekday {
+            matching_dates.push(current_date);
+        }
+
+        current_date = current_date.succ_opt()
+            .ok_or_else(|| miette!("Failed to increment date"))?;
+    }
+
+    // Get the nth occurrence
+    let target_date = if n > 0 {
+        matching_dates.get((n - 1) as usize)
+    } else {
+        let idx = (matching_dates.len() as i64 + n) as usize;
+        matching_dates.get(idx)
+    };
+
+    if let Some(date) = target_date {
+        let result = json!({
+            "year": date.year(),
+            "month": date.month() as i32,
+            "day": date.day() as i32,
+        });
+        Ok(DataValue::Json(JsonData(result)))
+    } else {
+        Ok(DataValue::Null)
+    }
+}
+
+define_op!(OP_LOCAL_MINUTES_TO_PARTS, 3, false);
+pub(crate) fn op_local_minutes_to_parts(args: &[DataValue]) -> Result<DataValue> {
+    let base_local_midnight_utc = args[0]
+        .get_int()
+        .ok_or_else(|| miette!("'local_minutes_to_parts' expects base_local_midnight_utc as integer"))?;
+    let minutes = args[1]
+        .get_int()
+        .ok_or_else(|| miette!("'local_minutes_to_parts' expects minutes as integer"))?;
+    let tz_str = args[2]
+        .get_str()
+        .ok_or_else(|| miette!("'local_minutes_to_parts' expects timezone string"))?;
+
+    let tz = chrono_tz::Tz::from_str(tz_str)
+        .map_err(|_| miette!("Invalid timezone: {}", tz_str))?;
+
+    // Convert base midnight to local timezone
+    let base_dt = Utc.timestamp_opt(base_local_midnight_utc, 0)
+        .single()
+        .ok_or_else(|| miette!("Invalid base timestamp"))?;
+    let base_local = base_dt.with_timezone(&tz);
+
+    // Add the minutes
+    let target_local = base_local + Duration::minutes(minutes);
+
+    let result = json!({
+        "year": target_local.year(),
+        "month": target_local.month() as i32,
+        "day": target_local.day() as i32,
+        "hour": target_local.hour() as i32,
+        "minute": target_local.minute() as i32,
+    });
+
+    Ok(DataValue::Json(JsonData(result)))
+}
+
+define_op!(OP_PARTS_TO_INSTANT_UTC, 2, false);
+pub(crate) fn op_parts_to_instant_utc(args: &[DataValue]) -> Result<DataValue> {
+    let parts_json = match &args[0] {
+        DataValue::Json(JsonData(json)) => json,
+        _ => bail!("'parts_to_instant_utc' expects parts as JSON object"),
+    };
+    let tz_str = args[1]
+        .get_str()
+        .ok_or_else(|| miette!("'parts_to_instant_utc' expects timezone string"))?;
+
+    let tz = chrono_tz::Tz::from_str(tz_str)
+        .map_err(|_| miette!("Invalid timezone: {}", tz_str))?;
+
+    // Extract parts from JSON
+    let year = parts_json.get("year")
+        .and_then(|v| v.as_i64())
+        .ok_or_else(|| miette!("Missing or invalid year in parts"))?;
+    let month = parts_json.get("month")
+        .and_then(|v| v.as_i64())
+        .ok_or_else(|| miette!("Missing or invalid month in parts"))?;
+    let day = parts_json.get("day")
+        .and_then(|v| v.as_i64())
+        .ok_or_else(|| miette!("Missing or invalid day in parts"))?;
+    let hour = parts_json.get("hour")
+        .and_then(|v| v.as_i64())
+        .ok_or_else(|| miette!("Missing or invalid hour in parts"))?;
+    let minute = parts_json.get("minute")
+        .and_then(|v| v.as_i64())
+        .ok_or_else(|| miette!("Missing or invalid minute in parts"))?;
+
+    // Create local datetime and convert to UTC
+    let dt = tz.with_ymd_and_hms(year as i32, month as u32, day as u32, hour as u32, minute as u32, 0)
+        .single()
+        .ok_or_else(|| miette!("Invalid date/time parts or ambiguous due to DST"))?;
+
+    Ok(DataValue::from(dt.timestamp()))
+}
+
+define_op!(OP_BUCKET_OF, 3, false);
+pub(crate) fn op_bucket_of(args: &[DataValue]) -> Result<DataValue> {
+    let t = args[0]
+        .get_int()
+        .ok_or_else(|| miette!("'bucket_of' expects timestamp as integer"))?;
+    let period = args[1]
+        .get_int()
+        .ok_or_else(|| miette!("'bucket_of' expects period as integer"))?;
+    let epoch0 = args[2]
+        .get_int()
+        .ok_or_else(|| miette!("'bucket_of' expects epoch0 as integer"))?;
+
+    if period <= 0 {
+        bail!("Period must be positive, got {}", period);
+    }
+
+    let bucket = (t - epoch0) / period;
+    Ok(DataValue::from(bucket))
+}
+
+define_op!(OP_BUCKET_START, 3, false);
+pub(crate) fn op_bucket_start(args: &[DataValue]) -> Result<DataValue> {
+    let k = args[0]
+        .get_int()
+        .ok_or_else(|| miette!("'bucket_start' expects bucket number as integer"))?;
+    let period = args[1]
+        .get_int()
+        .ok_or_else(|| miette!("'bucket_start' expects period as integer"))?;
+    let epoch0 = args[2]
+        .get_int()
+        .ok_or_else(|| miette!("'bucket_start' expects epoch0 as integer"))?;
+
+    if period <= 0 {
+        bail!("Period must be positive, got {}", period);
+    }
+
+    let start = epoch0 + k * period;
+    Ok(DataValue::from(start))
+}
+
+define_op!(OP_CEIL_TO_BUCKET, 3, false);
+pub(crate) fn op_ceil_to_bucket(args: &[DataValue]) -> Result<DataValue> {
+    let t = args[0]
+        .get_int()
+        .ok_or_else(|| miette!("'ceil_to_bucket' expects timestamp as integer"))?;
+    let period = args[1]
+        .get_int()
+        .ok_or_else(|| miette!("'ceil_to_bucket' expects period as integer"))?;
+    let epoch0 = args[2]
+        .get_int()
+        .ok_or_else(|| miette!("'ceil_to_bucket' expects epoch0 as integer"))?;
+
+    if period <= 0 {
+        bail!("Period must be positive, got {}", period);
+    }
+
+    let offset = t - epoch0;
+    let bucket = if offset >= 0 {
+        (offset + period - 1) / period
+    } else {
+        offset / period
+    };
+    let ceiling = epoch0 + bucket * period;
+    Ok(DataValue::from(ceiling))
+}
+
+define_op!(OP_FLOOR_TO_BUCKET, 3, false);
+pub(crate) fn op_floor_to_bucket(args: &[DataValue]) -> Result<DataValue> {
+    let t = args[0]
+        .get_int()
+        .ok_or_else(|| miette!("'floor_to_bucket' expects timestamp as integer"))?;
+    let period = args[1]
+        .get_int()
+        .ok_or_else(|| miette!("'floor_to_bucket' expects period as integer"))?;
+    let epoch0 = args[2]
+        .get_int()
+        .ok_or_else(|| miette!("'floor_to_bucket' expects epoch0 as integer"))?;
+
+    if period <= 0 {
+        bail!("Period must be positive, got {}", period);
+    }
+
+    let offset = t - epoch0;
+    let bucket = if offset >= 0 {
+        offset / period
+    } else {
+        (offset - period + 1) / period
+    };
+    let floor = epoch0 + bucket * period;
+    Ok(DataValue::from(floor))
+}
+
+define_op!(OP_DURATION_IN_BUCKETS, 2, false);
+pub(crate) fn op_duration_in_buckets(args: &[DataValue]) -> Result<DataValue> {
+    let d = args[0]
+        .get_int()
+        .ok_or_else(|| miette!("'duration_in_buckets' expects duration as integer"))?;
+    let period = args[1]
+        .get_int()
+        .ok_or_else(|| miette!("'duration_in_buckets' expects period as integer"))?;
+
+    if period <= 0 {
+        bail!("Period must be positive, got {}", period);
+    }
+
+    let buckets = (d + period - 1) / period; // Ceiling division for positive duration
+    Ok(DataValue::from(buckets))
 }

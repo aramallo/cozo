@@ -39,3 +39,4 @@ Cross.toml
 .cozo_repl_history
 /venv/
 flamegraph*.svg
+TODO.md
