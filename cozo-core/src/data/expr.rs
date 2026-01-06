@@ -976,6 +976,9 @@ pub(crate) fn get_op(name: &str) -> Option<&'static Op> {
         "ceil_to_bucket" => &OP_CEIL_TO_BUCKET,
         "floor_to_bucket" => &OP_FLOOR_TO_BUCKET,
         "duration_in_buckets" => &OP_DURATION_IN_BUCKETS,
+        "expand_daily" => &OP_EXPAND_DAILY,
+        "expand_monthly" => &OP_EXPAND_MONTHLY,
+        "expand_yearly" => &OP_EXPAND_YEARLY,
         _ => return None,
     })
 }

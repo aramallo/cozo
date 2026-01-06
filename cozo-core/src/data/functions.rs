@@ -3922,3 +3922,305 @@ pub(crate) fn op_duration_in_buckets(args: &[DataValue]) -> Result<DataValue> {
     let buckets = (d + period - 1) / period; // Ceiling division for positive duration
     Ok(DataValue::from(buckets))
 }
+
+define_op!(OP_EXPAND_DAILY, 5, false);
+pub(crate) fn op_expand_daily(args: &[DataValue]) -> Result<DataValue> {
+    let h0 = args[0]
+        .get_int()
+        .ok_or_else(|| miette!("'expand_daily' expects h0 (start minutes from midnight) as integer"))?;
+    let h1 = args[1]
+        .get_int()
+        .ok_or_else(|| miette!("'expand_daily' expects h1 (end minutes from midnight) as integer"))?;
+    let tz_str = args[2]
+        .get_str()
+        .ok_or_else(|| miette!("'expand_daily' expects timezone string"))?;
+    let start_ms = args[3]
+        .get_int()
+        .ok_or_else(|| miette!("'expand_daily' expects start timestamp in milliseconds"))?;
+    let end_ms = args[4]
+        .get_int()
+        .ok_or_else(|| miette!("'expand_daily' expects end timestamp in milliseconds"))?;
+
+    let tz = chrono_tz::Tz::from_str(tz_str)
+        .map_err(|_| miette!("Invalid timezone: {}", tz_str))?;
+
+    // Convert milliseconds to seconds for chrono
+    let start_dt = DateTime::from_timestamp(start_ms / 1000, ((start_ms % 1000) * 1_000_000) as u32)
+        .ok_or_else(|| miette!("Invalid start timestamp"))?
+        .with_timezone(&tz);
+    let end_dt = DateTime::from_timestamp(end_ms / 1000, ((end_ms % 1000) * 1_000_000) as u32)
+        .ok_or_else(|| miette!("Invalid end timestamp"))?
+        .with_timezone(&tz);
+
+    let mut intervals = Vec::new();
+
+    // Start from the date of start_dt
+    let mut current_date = start_dt.date_naive();
+    let end_date = end_dt.date_naive();
+
+    // Convert h0, h1 from minutes to hours and minutes
+    let h0_hour = (h0 / 60) as u32;
+    let h0_min = (h0 % 60) as u32;
+
+    while current_date <= end_date {
+        // Create start time for this day
+        if let Some(start_time) = current_date.and_hms_opt(h0_hour, h0_min, 0) {
+            // Handle end time - if h1 >= 1440 (24:00), use next day's midnight
+            let end_time_opt = if h1 >= 1440 {
+                current_date.succ_opt()
+                    .and_then(|next_day| next_day.and_hms_opt(0, 0, 0))
+            } else {
+                let h1_hour = (h1 / 60) as u32;
+                let h1_min = (h1 % 60) as u32;
+                current_date.and_hms_opt(h1_hour, h1_min, 0)
+            };
+
+            if let Some(end_time) = end_time_opt {
+                // Convert to timezone-aware datetime, handling DST
+                let interval_start = tz.from_local_datetime(&start_time)
+                    .earliest()
+                    .or_else(|| tz.from_local_datetime(&start_time).latest());
+                let interval_end = tz.from_local_datetime(&end_time)
+                    .earliest()
+                    .or_else(|| tz.from_local_datetime(&end_time).latest());
+
+                if let (Some(iv_start), Some(iv_end)) = (interval_start, interval_end) {
+                    let iv_start_ms = iv_start.timestamp() * 1000 + (iv_start.timestamp_subsec_millis() as i64);
+                    let iv_end_ms = iv_end.timestamp() * 1000 + (iv_end.timestamp_subsec_millis() as i64);
+
+                    // Only include intervals that overlap with [start_ms, end_ms]
+                    if iv_end_ms > start_ms && iv_start_ms < end_ms {
+                        intervals.push(DataValue::List(vec![
+                            DataValue::from(iv_start_ms),
+                            DataValue::from(iv_end_ms),
+                        ]));
+                    }
+                }
+            }
+        }
+
+        current_date = current_date.succ_opt()
+            .ok_or_else(|| miette!("Failed to increment date"))?;
+    }
+
+    Ok(DataValue::List(intervals))
+}
+
+define_op!(OP_EXPAND_MONTHLY, 6, false);
+pub(crate) fn op_expand_monthly(args: &[DataValue]) -> Result<DataValue> {
+    let day_of_month = args[0]
+        .get_int()
+        .ok_or_else(|| miette!("'expand_monthly' expects day_of_month as integer"))?;
+    let h0 = args[1]
+        .get_int()
+        .ok_or_else(|| miette!("'expand_monthly' expects h0 (start minutes from midnight) as integer"))?;
+    let h1 = args[2]
+        .get_int()
+        .ok_or_else(|| miette!("'expand_monthly' expects h1 (end minutes from midnight) as integer"))?;
+    let tz_str = args[3]
+        .get_str()
+        .ok_or_else(|| miette!("'expand_monthly' expects timezone string"))?;
+    let start_ms = args[4]
+        .get_int()
+        .ok_or_else(|| miette!("'expand_monthly' expects start timestamp in milliseconds"))?;
+    let end_ms = args[5]
+        .get_int()
+        .ok_or_else(|| miette!("'expand_monthly' expects end timestamp in milliseconds"))?;
+
+    if day_of_month < 1 || day_of_month > 31 {
+        bail!("day_of_month must be 1-31, got {}", day_of_month);
+    }
+
+    let tz = chrono_tz::Tz::from_str(tz_str)
+        .map_err(|_| miette!("Invalid timezone: {}", tz_str))?;
+
+    // Convert milliseconds to seconds for chrono
+    let start_dt = DateTime::from_timestamp(start_ms / 1000, ((start_ms % 1000) * 1_000_000) as u32)
+        .ok_or_else(|| miette!("Invalid start timestamp"))?
+        .with_timezone(&tz);
+    let end_dt = DateTime::from_timestamp(end_ms / 1000, ((end_ms % 1000) * 1_000_000) as u32)
+        .ok_or_else(|| miette!("Invalid end timestamp"))?
+        .with_timezone(&tz);
+
+    let mut intervals = Vec::new();
+
+    // Convert h0 from minutes to hours and minutes
+    let h0_hour = (h0 / 60) as u32;
+    let h0_min = (h0 % 60) as u32;
+
+    // Start from the month of start_dt
+    let mut current_year = start_dt.year();
+    let mut current_month = start_dt.month();
+    let end_year = end_dt.year();
+    let end_month = end_dt.month();
+
+    while (current_year, current_month) <= (end_year, end_month) {
+        // Calculate the actual day for this month (clamp to last day if needed)
+        let days_in_month = days_in_month_helper(current_year, current_month);
+        let actual_day = (day_of_month as u32).min(days_in_month);
+
+        if let Some(target_date) = NaiveDate::from_ymd_opt(current_year, current_month, actual_day) {
+            if let Some(start_time) = target_date.and_hms_opt(h0_hour, h0_min, 0) {
+                // Handle end time - if h1 >= 1440 (24:00), use next day's midnight
+                let end_time_opt = if h1 >= 1440 {
+                    target_date.succ_opt()
+                        .and_then(|next_day| next_day.and_hms_opt(0, 0, 0))
+                } else {
+                    let h1_hour = (h1 / 60) as u32;
+                    let h1_min = (h1 % 60) as u32;
+                    target_date.and_hms_opt(h1_hour, h1_min, 0)
+                };
+
+                if let Some(end_time) = end_time_opt {
+                    // Convert to timezone-aware datetime, handling DST
+                    let interval_start = tz.from_local_datetime(&start_time)
+                        .earliest()
+                        .or_else(|| tz.from_local_datetime(&start_time).latest());
+                    let interval_end = tz.from_local_datetime(&end_time)
+                        .earliest()
+                        .or_else(|| tz.from_local_datetime(&end_time).latest());
+
+                    if let (Some(iv_start), Some(iv_end)) = (interval_start, interval_end) {
+                        let iv_start_ms = iv_start.timestamp() * 1000 + (iv_start.timestamp_subsec_millis() as i64);
+                        let iv_end_ms = iv_end.timestamp() * 1000 + (iv_end.timestamp_subsec_millis() as i64);
+
+                        // Only include intervals that overlap with [start_ms, end_ms]
+                        if iv_end_ms > start_ms && iv_start_ms < end_ms {
+                            intervals.push(DataValue::List(vec![
+                                DataValue::from(iv_start_ms),
+                                DataValue::from(iv_end_ms),
+                            ]));
+                        }
+                    }
+                }
+            }
+        }
+
+        // Move to next month
+        if current_month == 12 {
+            current_year += 1;
+            current_month = 1;
+        } else {
+            current_month += 1;
+        }
+    }
+
+    Ok(DataValue::List(intervals))
+}
+
+define_op!(OP_EXPAND_YEARLY, 7, false);
+pub(crate) fn op_expand_yearly(args: &[DataValue]) -> Result<DataValue> {
+    let month = args[0]
+        .get_int()
+        .ok_or_else(|| miette!("'expand_yearly' expects month as integer"))?;
+    let day = args[1]
+        .get_int()
+        .ok_or_else(|| miette!("'expand_yearly' expects day as integer"))?;
+    let h0 = args[2]
+        .get_int()
+        .ok_or_else(|| miette!("'expand_yearly' expects h0 (start minutes from midnight) as integer"))?;
+    let h1 = args[3]
+        .get_int()
+        .ok_or_else(|| miette!("'expand_yearly' expects h1 (end minutes from midnight) as integer"))?;
+    let tz_str = args[4]
+        .get_str()
+        .ok_or_else(|| miette!("'expand_yearly' expects timezone string"))?;
+    let start_ms = args[5]
+        .get_int()
+        .ok_or_else(|| miette!("'expand_yearly' expects start timestamp in milliseconds"))?;
+    let end_ms = args[6]
+        .get_int()
+        .ok_or_else(|| miette!("'expand_yearly' expects end timestamp in milliseconds"))?;
+
+    if month < 1 || month > 12 {
+        bail!("month must be 1-12, got {}", month);
+    }
+    if day < 1 || day > 31 {
+        bail!("day must be 1-31, got {}", day);
+    }
+
+    let tz = chrono_tz::Tz::from_str(tz_str)
+        .map_err(|_| miette!("Invalid timezone: {}", tz_str))?;
+
+    // Convert milliseconds to seconds for chrono
+    let start_dt = DateTime::from_timestamp(start_ms / 1000, ((start_ms % 1000) * 1_000_000) as u32)
+        .ok_or_else(|| miette!("Invalid start timestamp"))?
+        .with_timezone(&tz);
+    let end_dt = DateTime::from_timestamp(end_ms / 1000, ((end_ms % 1000) * 1_000_000) as u32)
+        .ok_or_else(|| miette!("Invalid end timestamp"))?
+        .with_timezone(&tz);
+
+    let mut intervals = Vec::new();
+
+    // Convert h0 from minutes to hours and minutes
+    let h0_hour = (h0 / 60) as u32;
+    let h0_min = (h0 % 60) as u32;
+
+    let month_u32 = month as u32;
+
+    // Iterate over each year in the range
+    for current_year in start_dt.year()..=end_dt.year() {
+        // Calculate the actual day for this year/month (clamp to last day if needed)
+        let days_in_target_month = days_in_month_helper(current_year, month_u32);
+        let actual_day = (day as u32).min(days_in_target_month);
+
+        // For Feb 29, skip non-leap years entirely (don't clamp to Feb 28)
+        if month == 2 && day == 29 && !is_leap_year(current_year) {
+            continue;
+        }
+
+        if let Some(target_date) = NaiveDate::from_ymd_opt(current_year, month_u32, actual_day) {
+            if let Some(start_time) = target_date.and_hms_opt(h0_hour, h0_min, 0) {
+                // Handle end time - if h1 >= 1440 (24:00), use next day's midnight
+                let end_time_opt = if h1 >= 1440 {
+                    target_date.succ_opt()
+                        .and_then(|next_day| next_day.and_hms_opt(0, 0, 0))
+                } else {
+                    let h1_hour = (h1 / 60) as u32;
+                    let h1_min = (h1 % 60) as u32;
+                    target_date.and_hms_opt(h1_hour, h1_min, 0)
+                };
+
+                if let Some(end_time) = end_time_opt {
+                    // Convert to timezone-aware datetime, handling DST
+                    let interval_start = tz.from_local_datetime(&start_time)
+                        .earliest()
+                        .or_else(|| tz.from_local_datetime(&start_time).latest());
+                    let interval_end = tz.from_local_datetime(&end_time)
+                        .earliest()
+                        .or_else(|| tz.from_local_datetime(&end_time).latest());
+
+                    if let (Some(iv_start), Some(iv_end)) = (interval_start, interval_end) {
+                        let iv_start_ms = iv_start.timestamp() * 1000 + (iv_start.timestamp_subsec_millis() as i64);
+                        let iv_end_ms = iv_end.timestamp() * 1000 + (iv_end.timestamp_subsec_millis() as i64);
+
+                        // Only include intervals that overlap with [start_ms, end_ms]
+                        if iv_end_ms > start_ms && iv_start_ms < end_ms {
+                            intervals.push(DataValue::List(vec![
+                                DataValue::from(iv_start_ms),
+                                DataValue::from(iv_end_ms),
+                            ]));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(DataValue::List(intervals))
+}
+
+// Helper function to get days in a month
+fn days_in_month_helper(year: i32, month: u32) -> u32 {
+    match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 => if is_leap_year(year) { 29 } else { 28 },
+        _ => 30, // Should not happen
+    }
+}
+
+// Helper function to check if a year is a leap year
+fn is_leap_year(year: i32) -> bool {
+    (year % 4 == 0 && year % 100 != 0) || (year % 400 == 0)
+}

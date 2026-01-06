@@ -2837,3 +2837,301 @@ fn test_bucket_functions_edge_cases() {
     // Negative duration should be handled appropriately
     assert!(op_duration_in_buckets(&[DataValue::from(-100), DataValue::from(30)]).is_err());
 }
+
+#[test]
+fn test_expand_daily() {
+    // Test basic daily expansion for a week in January 2025
+    // January 1, 2025 00:00:00 UTC = 1735689600000 ms
+    // January 8, 2025 00:00:00 UTC = 1736294400000 ms
+    let start_ms = 1735689600000_i64;
+    let end_ms = 1736294400000_i64;
+
+    // Expand 9:00 AM to 5:00 PM (540 to 1020 minutes from midnight)
+    let result = op_expand_daily(&[
+        DataValue::from(540),   // h0 = 9:00 AM
+        DataValue::from(1020),  // h1 = 5:00 PM
+        DataValue::from("UTC"),
+        DataValue::from(start_ms),
+        DataValue::from(end_ms),
+    ]).unwrap();
+
+    if let DataValue::List(intervals) = result {
+        // Should have 7 intervals (Jan 1-7)
+        assert_eq!(intervals.len(), 7);
+
+        // Check first interval (Jan 1 9:00-17:00 UTC)
+        if let DataValue::List(first_iv) = &intervals[0] {
+            let iv_start = first_iv[0].get_int().unwrap();
+            let iv_end = first_iv[1].get_int().unwrap();
+            // Jan 1, 2025 9:00 UTC = 1735722000000 ms
+            assert_eq!(iv_start, 1735722000000);
+            // Jan 1, 2025 17:00 UTC = 1735750800000 ms
+            assert_eq!(iv_end, 1735750800000);
+        } else {
+            panic!("Expected list for interval");
+        }
+    } else {
+        panic!("Expected list result");
+    }
+
+    // Test with timezone (America/Chicago = CST/CDT)
+    let result_tz = op_expand_daily(&[
+        DataValue::from(540),   // 9:00 AM local
+        DataValue::from(1020),  // 5:00 PM local
+        DataValue::from("America/Chicago"),
+        DataValue::from(start_ms),
+        DataValue::from(end_ms),
+    ]).unwrap();
+
+    if let DataValue::List(intervals) = result_tz {
+        assert!(intervals.len() > 0);
+        // In CST (UTC-6), 9:00 AM local = 15:00 UTC
+        if let DataValue::List(first_iv) = &intervals[0] {
+            let iv_start = first_iv[0].get_int().unwrap();
+            // Jan 1, 2025 15:00 UTC = 1735743600000 ms
+            assert_eq!(iv_start, 1735743600000);
+        }
+    }
+
+    // Test empty range (end before start)
+    let result_empty = op_expand_daily(&[
+        DataValue::from(540),
+        DataValue::from(1020),
+        DataValue::from("UTC"),
+        DataValue::from(end_ms),
+        DataValue::from(start_ms), // swapped
+    ]).unwrap();
+
+    if let DataValue::List(intervals) = result_empty {
+        assert_eq!(intervals.len(), 0);
+    }
+
+    // Test partial overlap at start of range
+    // Range starts after 9:00 AM on Jan 1
+    let late_start_ms = 1735730000000_i64; // Jan 1, 2025 11:13 UTC
+    let result_partial = op_expand_daily(&[
+        DataValue::from(540),   // 9:00 AM
+        DataValue::from(1020),  // 5:00 PM
+        DataValue::from("UTC"),
+        DataValue::from(late_start_ms),
+        DataValue::from(end_ms),
+    ]).unwrap();
+
+    if let DataValue::List(intervals) = result_partial {
+        // Should still include Jan 1 interval since it overlaps
+        assert!(intervals.len() >= 7);
+    }
+}
+
+#[test]
+fn test_expand_monthly() {
+    // Test monthly expansion for Q1 2025
+    // January 1, 2025 00:00:00 UTC = 1735689600000 ms
+    // April 1, 2025 00:00:00 UTC = 1743465600000 ms
+    let start_ms = 1735689600000_i64;
+    let end_ms = 1743465600000_i64;
+
+    // Expand day 15 of each month, 10:00-11:00 AM
+    let result = op_expand_monthly(&[
+        DataValue::from(15),    // day_of_month
+        DataValue::from(600),   // h0 = 10:00 AM
+        DataValue::from(660),   // h1 = 11:00 AM
+        DataValue::from("UTC"),
+        DataValue::from(start_ms),
+        DataValue::from(end_ms),
+    ]).unwrap();
+
+    if let DataValue::List(intervals) = result {
+        // Should have 3 intervals (Jan 15, Feb 15, Mar 15)
+        assert_eq!(intervals.len(), 3);
+
+        // Check first interval (Jan 15 10:00-11:00 UTC)
+        if let DataValue::List(first_iv) = &intervals[0] {
+            let iv_start = first_iv[0].get_int().unwrap();
+            let iv_end = first_iv[1].get_int().unwrap();
+            // Jan 15, 2025 10:00 UTC = 1736935200000 ms
+            assert_eq!(iv_start, 1736935200000);
+            // Jan 15, 2025 11:00 UTC = 1736938800000 ms
+            assert_eq!(iv_end, 1736938800000);
+        }
+    } else {
+        panic!("Expected list result");
+    }
+
+    // Test day 31 clamping for February
+    let result_31 = op_expand_monthly(&[
+        DataValue::from(31),    // day_of_month = 31
+        DataValue::from(840),   // h0 = 14:00
+        DataValue::from(900),   // h1 = 15:00
+        DataValue::from("UTC"),
+        DataValue::from(start_ms),
+        DataValue::from(end_ms),
+    ]).unwrap();
+
+    if let DataValue::List(intervals) = result_31 {
+        // Should have 3 intervals (Jan 31, Feb 28, Mar 31)
+        assert_eq!(intervals.len(), 3);
+
+        // Check February interval (clamped to Feb 28, 2025)
+        if let DataValue::List(feb_iv) = &intervals[1] {
+            let iv_start = feb_iv[0].get_int().unwrap();
+            // Feb 28, 2025 14:00 UTC = 1740751200000 ms
+            assert_eq!(iv_start, 1740751200000);
+        }
+    }
+
+    // Test invalid day_of_month
+    assert!(op_expand_monthly(&[
+        DataValue::from(0),     // Invalid
+        DataValue::from(600),
+        DataValue::from(660),
+        DataValue::from("UTC"),
+        DataValue::from(start_ms),
+        DataValue::from(end_ms),
+    ]).is_err());
+
+    assert!(op_expand_monthly(&[
+        DataValue::from(32),    // Invalid
+        DataValue::from(600),
+        DataValue::from(660),
+        DataValue::from("UTC"),
+        DataValue::from(start_ms),
+        DataValue::from(end_ms),
+    ]).is_err());
+}
+
+#[test]
+fn test_expand_yearly() {
+    // Test yearly expansion for 2024-2027
+    // January 1, 2024 00:00:00 UTC = 1704067200000 ms
+    // January 1, 2028 00:00:00 UTC = 1830297600000 ms
+    let start_ms = 1704067200000_i64;
+    let end_ms = 1830297600000_i64;
+
+    // Expand December 25 (Christmas) as all-day event
+    let result = op_expand_yearly(&[
+        DataValue::from(12),    // month = December
+        DataValue::from(25),    // day = 25
+        DataValue::from(0),     // h0 = 00:00
+        DataValue::from(1440),  // h1 = 24:00
+        DataValue::from("UTC"),
+        DataValue::from(start_ms),
+        DataValue::from(end_ms),
+    ]).unwrap();
+
+    if let DataValue::List(intervals) = result {
+        // Should have 4 intervals (2024, 2025, 2026, 2027)
+        assert_eq!(intervals.len(), 4);
+
+        // Check first interval (Dec 25, 2024 00:00-24:00 UTC)
+        if let DataValue::List(first_iv) = &intervals[0] {
+            let iv_start = first_iv[0].get_int().unwrap();
+            let iv_end = first_iv[1].get_int().unwrap();
+            // Dec 25, 2024 00:00 UTC = 1735084800000 ms
+            assert_eq!(iv_start, 1735084800000);
+            // Dec 26, 2024 00:00 UTC = 1735171200000 ms
+            assert_eq!(iv_end, 1735171200000);
+        }
+    } else {
+        panic!("Expected list result");
+    }
+
+    // Test leap day (Feb 29) - should only appear in leap years
+    let result_leap = op_expand_yearly(&[
+        DataValue::from(2),     // month = February
+        DataValue::from(29),    // day = 29
+        DataValue::from(540),   // h0 = 09:00
+        DataValue::from(1020),  // h1 = 17:00
+        DataValue::from("UTC"),
+        DataValue::from(start_ms),
+        DataValue::from(end_ms),
+    ]).unwrap();
+
+    if let DataValue::List(intervals) = result_leap {
+        // Should have 1 interval (2024 is leap year, 2025-2027 are not)
+        assert_eq!(intervals.len(), 1);
+
+        // Check that it's Feb 29, 2024
+        if let DataValue::List(leap_iv) = &intervals[0] {
+            let iv_start = leap_iv[0].get_int().unwrap();
+            // Feb 29, 2024 09:00 UTC = 1709197200000 ms
+            assert_eq!(iv_start, 1709197200000);
+        }
+    }
+
+    // Test July 4th (Independence Day) with timezone
+    let result_tz = op_expand_yearly(&[
+        DataValue::from(7),     // month = July
+        DataValue::from(4),     // day = 4
+        DataValue::from(0),     // h0 = 00:00 local
+        DataValue::from(1440),  // h1 = 24:00 local
+        DataValue::from("America/Chicago"),
+        DataValue::from(start_ms),
+        DataValue::from(end_ms),
+    ]).unwrap();
+
+    if let DataValue::List(intervals) = result_tz {
+        // Should have 4 intervals (2024, 2025, 2026, 2027)
+        assert_eq!(intervals.len(), 4);
+
+        // July is in CDT (UTC-5), so midnight local = 05:00 UTC
+        if let DataValue::List(first_iv) = &intervals[0] {
+            let iv_start = first_iv[0].get_int().unwrap();
+            // July 4, 2024 00:00 CDT = July 4, 2024 05:00 UTC = 1720069200000 ms
+            assert_eq!(iv_start, 1720069200000);
+        }
+    }
+
+    // Test invalid month
+    assert!(op_expand_yearly(&[
+        DataValue::from(0),     // Invalid
+        DataValue::from(25),
+        DataValue::from(0),
+        DataValue::from(1440),
+        DataValue::from("UTC"),
+        DataValue::from(start_ms),
+        DataValue::from(end_ms),
+    ]).is_err());
+
+    assert!(op_expand_yearly(&[
+        DataValue::from(13),    // Invalid
+        DataValue::from(25),
+        DataValue::from(0),
+        DataValue::from(1440),
+        DataValue::from("UTC"),
+        DataValue::from(start_ms),
+        DataValue::from(end_ms),
+    ]).is_err());
+
+    // Test invalid day
+    assert!(op_expand_yearly(&[
+        DataValue::from(12),
+        DataValue::from(0),     // Invalid
+        DataValue::from(0),
+        DataValue::from(1440),
+        DataValue::from("UTC"),
+        DataValue::from(start_ms),
+        DataValue::from(end_ms),
+    ]).is_err());
+
+    assert!(op_expand_yearly(&[
+        DataValue::from(12),
+        DataValue::from(32),    // Invalid
+        DataValue::from(0),
+        DataValue::from(1440),
+        DataValue::from("UTC"),
+        DataValue::from(start_ms),
+        DataValue::from(end_ms),
+    ]).is_err());
+
+    // Test invalid timezone
+    assert!(op_expand_yearly(&[
+        DataValue::from(12),
+        DataValue::from(25),
+        DataValue::from(0),
+        DataValue::from(1440),
+        DataValue::from("Invalid/Timezone"),
+        DataValue::from(start_ms),
+        DataValue::from(end_ms),
+    ]).is_err());
+}
