@@ -6,9 +6,33 @@
 
 #include <iostream>
 #include <memory>
+#include <cstdlib>
 #include "db.h"
 #include "cozorocks/src/bridge/mod.rs.h"
 #include "rocksdb/utilities/options_util.h"
+
+// Default block cache size: 512 MB
+// Can be overridden via COZO_ROCKSDB_BLOCK_CACHE_MB environment variable
+static const size_t DEFAULT_BLOCK_CACHE_MB = 2048;
+
+// Default max open files (256 is reasonable for most workloads)
+// Can be overridden via COZO_ROCKSDB_MAX_OPEN_FILES environment variable
+static const int DEFAULT_MAX_OPEN_FILES = 5000;
+
+// Shared block cache - created once, used by all database instances
+static std::shared_ptr<Cache> get_shared_block_cache() {
+    static std::shared_ptr<Cache> shared_cache = nullptr;
+    if (shared_cache == nullptr) {
+        size_t cache_size_mb = DEFAULT_BLOCK_CACHE_MB;
+        const char* env_cache = std::getenv("COZO_ROCKSDB_BLOCK_CACHE_MB");
+        if (env_cache != nullptr) {
+            cache_size_mb = std::strtoul(env_cache, nullptr, 10);
+            if (cache_size_mb == 0) cache_size_mb = DEFAULT_BLOCK_CACHE_MB;
+        }
+        shared_cache = NewLRUCache(cache_size_mb * 1024 * 1024);
+    }
+    return shared_cache;
+}
 
 Options default_db_options() {
     Options options = Options();
@@ -19,6 +43,7 @@ Options default_db_options() {
     options.bytes_per_sync = 1048576;
     options.compaction_pri = kMinOverlappingRatio;
     BlockBasedTableOptions table_options;
+    table_options.block_cache = get_shared_block_cache();
     table_options.block_size = 16 * 1024;
     table_options.cache_index_and_filter_blocks = true;
     table_options.pin_l0_filter_and_index_blocks_in_cache = true;
@@ -37,11 +62,8 @@ ColumnFamilyOptions default_cf_options() {
     options.level_compaction_dynamic_level_bytes = true;
     options.compaction_pri = kMinOverlappingRatio;
 
-//    auto cache = NewLRUCache(128 << 20);
-
     BlockBasedTableOptions table_options;
-//    table_options.block_cache = cache;
-
+    table_options.block_cache = get_shared_block_cache();
     table_options.block_size = 16 * 1024;
     table_options.cache_index_and_filter_blocks = true;
     table_options.pin_l0_filter_and_index_blocks_in_cache = true;
@@ -56,12 +78,6 @@ ColumnFamilyOptions default_cf_options() {
 shared_ptr <RocksDbBridge> open_db(const DbOpts &opts, RocksDbStatus &status) {
     auto options = default_db_options();
 
-    shared_ptr<Cache> cache = nullptr;
-
-    if (opts.block_cache_size > 0) {
-        cache = NewLRUCache(1 * 1024 * 1024 * 1024);
-    }
-
     if (!opts.options_path.empty()) {
         DBOptions loaded_db_opt;
         std::vector<ColumnFamilyDescriptor> loaded_cf_descs;
@@ -74,13 +90,11 @@ shared_ptr <RocksDbBridge> open_db(const DbOpts &opts, RocksDbStatus &status) {
             return nullptr;
         }
 
-        if (cache != nullptr) {
-            for (size_t i = 0; i < loaded_cf_descs.size(); ++i) {
-                auto* loaded_bbt_opt =
-                        loaded_cf_descs[0]
-                                .options.table_factory->GetOptions<BlockBasedTableOptions>();
-                loaded_bbt_opt->block_cache = cache;
-            }
+        // Ensure loaded options use the shared block cache
+        for (size_t i = 0; i < loaded_cf_descs.size(); ++i) {
+            auto* loaded_bbt_opt =
+                    loaded_cf_descs[i].options.table_factory->GetOptions<BlockBasedTableOptions>();
+            loaded_bbt_opt->block_cache = get_shared_block_cache();
         }
 
         options = Options(loaded_db_opt, loaded_cf_descs[0].options);
@@ -97,6 +111,15 @@ shared_ptr <RocksDbBridge> open_db(const DbOpts &opts, RocksDbStatus &status) {
     }
     options.create_if_missing = opts.create_if_missing;
     options.paranoid_checks = opts.paranoid_checks;
+
+    // Limit max open files to control memory usage
+    const char* env_max_files = std::getenv("COZO_ROCKSDB_MAX_OPEN_FILES");
+    if (env_max_files != nullptr) {
+        options.max_open_files = std::atoi(env_max_files);
+    } else {
+        options.max_open_files = DEFAULT_MAX_OPEN_FILES;
+    }
+
     if (opts.enable_blob_files) {
         options.enable_blob_files = true;
 
@@ -108,8 +131,11 @@ shared_ptr <RocksDbBridge> open_db(const DbOpts &opts, RocksDbStatus &status) {
     }
     if (opts.use_bloom_filter) {
         BlockBasedTableOptions table_options;
+        table_options.block_cache = get_shared_block_cache();
         table_options.filter_policy.reset(NewBloomFilterPolicy(opts.bloom_filter_bits_per_key, false));
         table_options.whole_key_filtering = opts.bloom_filter_whole_key_filtering;
+        table_options.cache_index_and_filter_blocks = true;
+        table_options.pin_l0_filter_and_index_blocks_in_cache = true;
         options.table_factory.reset(NewBlockBasedTableFactory(table_options));
     }
     if (opts.use_capped_prefix_extractor) {
