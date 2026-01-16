@@ -2942,8 +2942,8 @@ pub(crate) fn op_interval_union(args: &[DataValue]) -> Result<DataValue> {
     let bs = b[0].get_int().ok_or_else(|| miette!("interval start must be integer"))?;
     let be = b[1].get_int().ok_or_else(|| miette!("interval end must be integer"))?;
 
-    // Check if intervals are adjacent or overlapping
-    if ae >= bs && as_ <= be {
+    // Check if intervals are overlapping (not just adjacent)
+    if ae > bs && as_ < be {
         // Can merge into single interval
         let s = as_.min(bs);
         let e = ae.max(be);
@@ -3335,12 +3335,12 @@ pub(crate) fn op_allen_finished_by(args: &[DataValue]) -> Result<DataValue> {
 
 define_op!(OP_EXPAND_WEEKLY_DAYS, 6, false);
 pub(crate) fn op_expand_weekly_days(args: &[DataValue]) -> Result<DataValue> {
-    let h0 = args[0]
+    let start_ts = args[0]
         .get_int()
-        .ok_or_else(|| miette!("'expand_weekly_days' expects start hour as integer"))?;
-    let h1 = args[1]
+        .ok_or_else(|| miette!("'expand_weekly_days' expects start timestamp as integer"))?;
+    let end_ts = args[1]
         .get_int()
-        .ok_or_else(|| miette!("'expand_weekly_days' expects end hour as integer"))?;
+        .ok_or_else(|| miette!("'expand_weekly_days' expects end timestamp as integer"))?;
 
     let by_wday_slice = args[2]
         .get_slice()
@@ -3363,40 +3363,61 @@ pub(crate) fn op_expand_weekly_days(args: &[DataValue]) -> Result<DataValue> {
     let tz = chrono_tz::Tz::from_str(tz_str)
         .map_err(|_| miette!("Invalid timezone: {}", tz_str))?;
 
-    // Convert hour range to UTC timestamps for a sample week
-    let base_date = NaiveDate::from_ymd_opt(2024, 1, 1) // Start of week (Monday)
-        .ok_or_else(|| miette!("Failed to create base date"))?;
+    // Convert timestamps to dates in the target timezone
+    let start_dt = Utc.timestamp_opt(start_ts, 0)
+        .single()
+        .ok_or_else(|| miette!("Invalid start timestamp"))?
+        .with_timezone(&tz);
+    let end_dt = Utc.timestamp_opt(end_ts, 0)
+        .single()
+        .ok_or_else(|| miette!("Invalid end timestamp"))?
+        .with_timezone(&tz);
 
     let mut intervals = Vec::new();
+    let mut current_date = start_dt.date_naive();
+    let end_date = end_dt.date_naive();
 
-    // Process each requested weekday
-    for &wday in &by_wday {
-        if wday < 1 || wday > 7 {
-            bail!("Weekday must be 1-7, got {}", wday);
+    // Iterate through each day in the range
+    while current_date < end_date {
+        // Get weekday (1 = Monday, 7 = Sunday)
+        let weekday = match current_date.weekday() {
+            Weekday::Mon => 1,
+            Weekday::Tue => 2,
+            Weekday::Wed => 3,
+            Weekday::Thu => 4,
+            Weekday::Fri => 5,
+            Weekday::Sat => 6,
+            Weekday::Sun => 7,
+        };
+
+        // Check if this weekday is in the requested list
+        if by_wday.contains(&weekday) {
+            // Create start time for this day
+            let start_hour = (start_min / 60) as u32;
+            let start_minute = (start_min % 60) as u32;
+            let day_start = current_date.and_hms_opt(start_hour, start_minute, 0)
+                .ok_or_else(|| miette!("Invalid start time"))?;
+            let day_start_utc = tz.from_local_datetime(&day_start)
+                .single()
+                .ok_or_else(|| miette!("Ambiguous start time in timezone"))?;
+
+            // Create end time for this day
+            let end_hour = (end_min / 60) as u32;
+            let end_minute = (end_min % 60) as u32;
+            let day_end = current_date.and_hms_opt(end_hour, end_minute, 0)
+                .ok_or_else(|| miette!("Invalid end time"))?;
+            let day_end_utc = tz.from_local_datetime(&day_end)
+                .single()
+                .ok_or_else(|| miette!("Ambiguous end time in timezone"))?;
+
+            intervals.push(DataValue::List(vec![
+                DataValue::from(day_start_utc.timestamp()),
+                DataValue::from(day_end_utc.timestamp())
+            ]));
         }
 
-        // Calculate date for this weekday (wday 1 = Monday, 7 = Sunday)
-        let days_from_monday = if wday == 7 { 6 } else { wday - 1 };
-        let target_date = base_date + Duration::days(days_from_monday);
-
-        // Create start time
-        let start_dt = target_date.and_hms_opt(h0 as u32, start_min as u32, 0)
-            .ok_or_else(|| miette!("Invalid start time"))?;
-        let start_utc = tz.from_local_datetime(&start_dt)
-            .single()
-            .ok_or_else(|| miette!("Ambiguous start time in timezone"))?;
-
-        // Create end time
-        let end_dt = target_date.and_hms_opt(h1 as u32, end_min as u32, 0)
-            .ok_or_else(|| miette!("Invalid end time"))?;
-        let end_utc = tz.from_local_datetime(&end_dt)
-            .single()
-            .ok_or_else(|| miette!("Ambiguous end time in timezone"))?;
-
-        intervals.push(DataValue::List(vec![
-            DataValue::from(start_utc.timestamp()),
-            DataValue::from(end_utc.timestamp())
-        ]));
+        current_date = current_date.succ_opt()
+            .ok_or_else(|| miette!("Date overflow"))?;
     }
 
     Ok(DataValue::List(intervals))
@@ -3830,7 +3851,7 @@ pub(crate) fn op_bucket_of(args: &[DataValue]) -> Result<DataValue> {
         bail!("Period must be positive, got {}", period);
     }
 
-    let bucket = (t - epoch0) / period;
+    let bucket = (t - epoch0).div_euclid(period);
     Ok(DataValue::from(bucket))
 }
 
@@ -3917,6 +3938,10 @@ pub(crate) fn op_duration_in_buckets(args: &[DataValue]) -> Result<DataValue> {
 
     if period <= 0 {
         bail!("Period must be positive, got {}", period);
+    }
+
+    if d < 0 {
+        bail!("Duration must be non-negative, got {}", d);
     }
 
     let buckets = (d + period - 1) / period; // Ceiling division for positive duration

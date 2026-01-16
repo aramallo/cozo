@@ -1862,7 +1862,7 @@ fn test_time_utility_functions() {
 #[test]
 fn test_enhanced_timestamp_edge_cases() {
     // Test DST transitions with America/New_York
-    let dst_start_2024 = 1710651600.0; // 2024-03-10 07:00:00 UTC (2am EST -> 3am EDT)
+    let dst_start_2024 = 1710054000.0; // 2024-03-10 07:00:00 UTC (2am EST -> 3am EDT)
     let parts = op_to_local_parts(&[DataValue::from(dst_start_2024), DataValue::from("America/New_York")]).unwrap();
     if let DataValue::Json(JsonData(json)) = parts {
         assert_eq!(json["year"], 2024);
@@ -1872,7 +1872,7 @@ fn test_enhanced_timestamp_edge_cases() {
     }
 
     // Test leap year handling
-    let leap_day_2024 = 1709251200.0; // 2024-02-29 00:00:00 UTC
+    let leap_day_2024 = 1709164800.0; // 2024-02-29 00:00:00 UTC
     let parts = op_to_local_parts(&[DataValue::from(leap_day_2024), DataValue::from("UTC")]).unwrap();
     if let DataValue::Json(JsonData(json)) = parts {
         assert_eq!(json["year"], 2024);
@@ -1941,9 +1941,11 @@ fn test_enhanced_timestamp_edge_cases() {
     );
 
     // Test start_of_day_local with different timezones
+    // Input: 1704081600 = Jan 1, 2024 04:00:00 UTC = Dec 31, 2023 20:00:00 PST
+    // Expected: Start of Dec 31, 2023 in LA = Dec 31, 2023 00:00:00 PST = Dec 31, 2023 08:00:00 UTC = 1704009600
     let ts_pacific = 1704067200.0; // 2024-01-01 00:00:00 UTC
     let start_pacific = op_start_of_day_local(&[DataValue::from(ts_pacific + 14400.0), DataValue::from("America/Los_Angeles")]).unwrap();
-    let expected_pacific = ts_pacific + 8.0 * 3600.0; // UTC+8 in winter (PST)
+    let expected_pacific = ts_pacific - 16.0 * 3600.0; // Dec 31, 2023 08:00:00 UTC (midnight PST)
     assert_eq!(start_pacific, DataValue::from(expected_pacific));
 
     // Test from_local_parts with invalid dates (should handle gracefully)
