@@ -12,26 +12,27 @@
 #include "rocksdb/utilities/options_util.h"
 #include "rocksdb/rate_limiter.h"
 
-// Default block cache size: 2GB
+// Default block cache size: 256MB (reduced from 2GB for better memory control)
 // Can be overridden via COZO_ROCKSDB_BLOCK_CACHE_MB environment variable
-static const size_t DEFAULT_BLOCK_CACHE_MB = 2048;
+static const size_t DEFAULT_BLOCK_CACHE_MB = 256;
 
-// Default max open files
+// Default max open files (reduced from 5000 for better memory control)
 // Can be overridden via COZO_ROCKSDB_MAX_OPEN_FILES environment variable
-static const int DEFAULT_MAX_OPEN_FILES = 5000;
+static const int DEFAULT_MAX_OPEN_FILES = 1000;
 
 // Write buffer (memtable) settings - critical for controlling memory under write-heavy workloads
-// Default write buffer size: 32MB per memtable (RocksDB default is 64MB)
+// Default write buffer size: 16MB per memtable (reduced from 32MB for better memory control)
 // Can be overridden via COZO_ROCKSDB_WRITE_BUFFER_SIZE_MB environment variable
-static const size_t DEFAULT_WRITE_BUFFER_SIZE_MB = 32;
+static const size_t DEFAULT_WRITE_BUFFER_SIZE_MB = 16;
 
 // Maximum number of memtables (active + immutable) before stalling writes
 // Can be overridden via COZO_ROCKSDB_MAX_WRITE_BUFFER_NUMBER environment variable
 static const int DEFAULT_MAX_WRITE_BUFFER_NUMBER = 3;
 
 // Total memory budget for all memtables across the database (0 = unlimited)
+// Reduced from 256MB to 128MB for better memory control
 // Can be overridden via COZO_ROCKSDB_DB_WRITE_BUFFER_SIZE_MB environment variable
-static const size_t DEFAULT_DB_WRITE_BUFFER_SIZE_MB = 256;
+static const size_t DEFAULT_DB_WRITE_BUFFER_SIZE_MB = 128;
 
 // Compaction backpressure settings - prevents runaway memory growth under heavy writes
 // Soft limit: writes slow down when pending compaction bytes exceed this (default 64GB)
