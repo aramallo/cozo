@@ -17,6 +17,7 @@
 #include "rocksdb/table.h"
 #include "rocksdb/filter_policy.h"
 #include "rocksdb/slice_transform.h"
+#include "rocksdb/advanced_cache.h"  // For full Cache class definition
 
 using namespace rocksdb;
 using namespace std;
