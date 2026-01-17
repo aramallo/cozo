@@ -298,10 +298,19 @@ fn build_rocksdb() {
         // Add jemalloc include path for RocksDB C++ compilation
         // tikv-jemalloc-sys exports cargo:root=..., which becomes DEP_TIKV_JEMALLOC_SYS_ROOT
         // The jemalloc headers are in {root}/include
+        eprintln!("Looking for jemalloc include path...");
+        for (key, value) in env::vars() {
+            if key.contains("JEMALLOC") || key.contains("jemalloc") {
+                eprintln!("Found env: {}={}", key, value);
+            }
+        }
         if let Some(jemalloc_root) = env::var_os("DEP_TIKV_JEMALLOC_SYS_ROOT") {
-            let mut include_path = PathBuf::from(jemalloc_root);
+            let mut include_path = PathBuf::from(&jemalloc_root);
             include_path.push("include");
+            eprintln!("Using jemalloc include path: {:?}", include_path);
             config.include(&include_path);
+        } else {
+            eprintln!("DEP_TIKV_JEMALLOC_SYS_ROOT not found!");
         }
     }
 
