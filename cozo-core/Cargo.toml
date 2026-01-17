@@ -40,6 +40,10 @@ graph-algo = ["graph", "rayon"]
 requests = ["dep:minreq"]
 ## Uses jemalloc as the global allocator, can make a difference in performance.
 jemalloc = ["dep:tikv-jemallocator-global", "cozorocks?/jemalloc"]
+## Enable jemalloc for RocksDB only (without setting global allocator).
+## Use this when the caller already sets its own global allocator with jemalloc.
+## This enables ROCKSDB_JEMALLOC defines for jemalloc-specific optimizations.
+rocksdb-jemalloc = ["cozorocks?/jemalloc"]
 ## Enables io-uring option for the RocksDB storage
 io-uring = ["cozorocks?/io-uring"]
 ## Polyfills for the WASM target
