@@ -294,6 +294,12 @@ fn build_rocksdb() {
         config.define("ROCKSDB_JEMALLOC", Some("1"));
         config.define("WITH_JEMALLOC", "ON");
         config.define("JEMALLOC", Some("1"));
+
+        // Add jemalloc include path for RocksDB C++ compilation
+        // tikv-jemalloc-sys provides the DEP_JEMALLOC_INCLUDE environment variable
+        if let Some(jemalloc_include) = env::var_os("DEP_JEMALLOC_INCLUDE") {
+            config.include(&jemalloc_include);
+        }
     }
 
     #[cfg(feature = "io-uring")]
