@@ -66,7 +66,7 @@ Options default_db_options() {
     table_options.block_size = 16 * 1024;
     table_options.cache_index_and_filter_blocks = true;
     table_options.pin_l0_filter_and_index_blocks_in_cache = true;
-    table_options.format_version = 5;
+    table_options.format_version = 6;
 
     auto table_factory = NewBlockBasedTableFactory(table_options);
     options.table_factory.reset(table_factory);
@@ -90,7 +90,7 @@ ColumnFamilyOptions default_cf_options() {
     table_options.block_size = 16 * 1024;
     table_options.cache_index_and_filter_blocks = true;
     table_options.pin_l0_filter_and_index_blocks_in_cache = true;
-    table_options.format_version = 5;
+    table_options.format_version = 6;
 
     auto table_factory = NewBlockBasedTableFactory(table_options);
     options.table_factory.reset(table_factory);
