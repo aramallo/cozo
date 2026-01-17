@@ -13,6 +13,8 @@ use log::info;
 use miette::{miette, IntoDiagnostic, Result, WrapErr};
 
 use cozorocks::{DbBuilder, DbIter, RocksDb, RocksDbMemoryStats, Tx};
+// Re-export block cache control functions (process-global)
+pub use cozorocks::{BlockCacheStatsResult, clear_block_cache, set_block_cache_capacity_mb, get_block_cache_stats};
 
 use crate::data::tuple::{check_key_for_validity, Tuple};
 use crate::data::value::ValidityTs;

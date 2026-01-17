@@ -205,6 +205,16 @@ pub(crate) mod ffi {
         fn status(self: &IterBridge, status: &mut RocksDbStatus);
         fn key(self: &IterBridge) -> &[u8];
         fn val(self: &IterBridge) -> &[u8];
+
+        // Block cache control functions (process-global, affects all RocksDB instances)
+        type BlockCacheStats;
+        fn get_capacity(self: &BlockCacheStats) -> usize;
+        fn get_usage(self: &BlockCacheStats) -> usize;
+        fn get_pinned_usage(self: &BlockCacheStats) -> usize;
+
+        fn clear_shared_block_cache();
+        fn set_shared_block_cache_capacity(capacity_mb: usize);
+        fn get_shared_block_cache_stats() -> UniquePtr<BlockCacheStats>;
     }
 }
 

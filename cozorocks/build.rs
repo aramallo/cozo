@@ -288,7 +288,12 @@ fn build_rocksdb() {
     config.define("ROCKSDB_SUPPORT_THREAD_LOCAL", None);
 
     if cfg!(feature = "jemalloc") {
+        // Enable jemalloc integration in RocksDB
+        // ROCKSDB_JEMALLOC enables jemalloc-specific code paths and statistics
+        // WITH_JEMALLOC is an older define also recognized by RocksDB
+        config.define("ROCKSDB_JEMALLOC", Some("1"));
         config.define("WITH_JEMALLOC", "ON");
+        config.define("JEMALLOC", Some("1"));
     }
 
     #[cfg(feature = "io-uring")]

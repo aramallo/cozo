@@ -268,3 +268,39 @@ impl SstWriter {
 unsafe impl Send for RocksDb {}
 
 unsafe impl Sync for RocksDb {}
+
+/// Block cache statistics (process-global)
+#[derive(Debug, Clone, Default)]
+pub struct BlockCacheStatsResult {
+    /// Total capacity in bytes
+    pub capacity: usize,
+    /// Current usage in bytes
+    pub usage: usize,
+    /// Pinned usage in bytes (entries currently in use, cannot be evicted)
+    pub pinned_usage: usize,
+}
+
+/// Clear all entries from the shared RocksDB block cache (process-global).
+/// This releases memory but keeps the cache structure.
+/// New reads will repopulate the cache.
+pub fn clear_block_cache() {
+    clear_shared_block_cache();
+}
+
+/// Set the capacity of the shared RocksDB block cache in MB (process-global).
+/// Setting to 0 effectively disables caching (but doesn't release the cache object).
+/// Setting to a smaller value will trigger eviction of excess entries.
+pub fn set_block_cache_capacity_mb(capacity_mb: usize) {
+    set_shared_block_cache_capacity(capacity_mb);
+}
+
+/// Get statistics about the shared RocksDB block cache (process-global).
+/// Returns capacity, usage, and pinned usage in bytes.
+pub fn get_block_cache_stats() -> BlockCacheStatsResult {
+    let stats = get_shared_block_cache_stats();
+    BlockCacheStatsResult {
+        capacity: stats.get_capacity(),
+        usage: stats.get_usage(),
+        pinned_usage: stats.get_pinned_usage(),
+    }
+}

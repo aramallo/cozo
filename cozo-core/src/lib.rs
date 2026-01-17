@@ -60,6 +60,9 @@ pub use runtime::temp_store::RegularTempStore;
 pub use storage::mem::{new_cozo_mem, MemStorage};
 #[cfg(feature = "storage-rocksdb")]
 pub use storage::rocks::{new_cozo_rocksdb, RocksDbStorage};
+// Block cache control functions (process-global, affects all RocksDB instances)
+#[cfg(feature = "storage-rocksdb")]
+pub use storage::rocks::{BlockCacheStatsResult, clear_block_cache, set_block_cache_capacity_mb, get_block_cache_stats};
 #[cfg(feature = "storage-new-rocksdb")]
 pub use storage::newrocks::{new_cozo_newrocksdb, NewRocksDbStorage};
 #[cfg(feature = "storage-sled")]

@@ -7,6 +7,7 @@
 #include <iostream>
 #include <memory>
 #include <cstdlib>
+#include <mutex>
 #include "db.h"
 #include "cozorocks/src/bridge/mod.rs.h"
 #include "rocksdb/utilities/options_util.h"
@@ -64,18 +65,59 @@ static std::shared_ptr<RateLimiter> get_shared_rate_limiter() {
 }
 
 // Shared block cache - created once, used by all database instances
+// This is a process-global cache that persists until explicitly cleared or reset
+static std::shared_ptr<Cache> shared_cache = nullptr;
+static std::mutex shared_cache_mutex;
+static size_t shared_cache_capacity_mb = DEFAULT_BLOCK_CACHE_MB;
+
 static std::shared_ptr<Cache> get_shared_block_cache() {
-    static std::shared_ptr<Cache> shared_cache = nullptr;
+    std::lock_guard<std::mutex> lock(shared_cache_mutex);
     if (shared_cache == nullptr) {
-        size_t cache_size_mb = DEFAULT_BLOCK_CACHE_MB;
+        size_t cache_size_mb = shared_cache_capacity_mb;
         const char* env_cache = std::getenv("COZO_ROCKSDB_BLOCK_CACHE_MB");
         if (env_cache != nullptr) {
             cache_size_mb = std::strtoul(env_cache, nullptr, 10);
             if (cache_size_mb == 0) cache_size_mb = DEFAULT_BLOCK_CACHE_MB;
+            shared_cache_capacity_mb = cache_size_mb;
         }
         shared_cache = NewLRUCache(cache_size_mb * 1024 * 1024);
     }
     return shared_cache;
+}
+
+// Clear all entries from the shared block cache (releases memory but keeps cache structure)
+void clear_shared_block_cache() {
+    std::lock_guard<std::mutex> lock(shared_cache_mutex);
+    if (shared_cache != nullptr) {
+        // EraseUnRefEntries removes all entries not currently in use
+        shared_cache->EraseUnRefEntries();
+    }
+}
+
+// Set the capacity of the shared block cache in MB
+// Setting to 0 effectively disables caching (but doesn't release the cache object)
+void set_shared_block_cache_capacity(size_t capacity_mb) {
+    std::lock_guard<std::mutex> lock(shared_cache_mutex);
+    shared_cache_capacity_mb = capacity_mb;
+    if (shared_cache != nullptr) {
+        shared_cache->SetCapacity(capacity_mb * 1024 * 1024);
+    }
+}
+
+// Get shared block cache statistics
+// Returns: capacity, usage, pinned_usage (all in bytes)
+std::unique_ptr<BlockCacheStats> get_shared_block_cache_stats() {
+    auto stats = std::make_unique<BlockCacheStats>();
+    stats->capacity = 0;
+    stats->usage = 0;
+    stats->pinned_usage = 0;
+    std::lock_guard<std::mutex> lock(shared_cache_mutex);
+    if (shared_cache != nullptr) {
+        stats->capacity = shared_cache->GetCapacity();
+        stats->usage = shared_cache->GetUsage();
+        stats->pinned_usage = shared_cache->GetPinnedUsage();
+    }
+    return stats;
 }
 
 Options default_db_options() {

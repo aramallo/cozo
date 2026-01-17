@@ -155,4 +155,26 @@ struct RocksDbBridge {
 shared_ptr<RocksDbBridge>
 open_db(const DbOpts &opts, RocksDbStatus &status);
 
+// Block cache statistics structure
+struct BlockCacheStats {
+    size_t capacity;
+    size_t usage;
+    size_t pinned_usage;
+
+    // Getter methods for cxx bridge
+    size_t get_capacity() const { return capacity; }
+    size_t get_usage() const { return usage; }
+    size_t get_pinned_usage() const { return pinned_usage; }
+};
+
+// Block cache control functions (process-global)
+// Clear all entries from the shared block cache (releases memory)
+void clear_shared_block_cache();
+
+// Set the capacity of the shared block cache in MB
+void set_shared_block_cache_capacity(size_t capacity_mb);
+
+// Get block cache statistics
+std::unique_ptr<BlockCacheStats> get_shared_block_cache_stats();
+
 #endif //COZOROCKS_DB_H
