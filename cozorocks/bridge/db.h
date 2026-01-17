@@ -110,6 +110,41 @@ struct RocksDbBridge {
         write_status(s, status);
     }
 
+    // Flush all memtables to disk
+    void flush(RocksDbStatus &status) const {
+        FlushOptions flush_opts;
+        flush_opts.wait = true;
+        auto s = db->Flush(flush_opts);
+        write_status(s, status);
+    }
+
+    // Get a RocksDB property value as string
+    rust::String get_property(rust::Str property_name) const {
+        std::string value;
+        std::string prop_name(property_name);
+        DB *db_ = get_base_db();
+        if (db_->GetProperty(prop_name, &value)) {
+            return rust::String(value);
+        }
+        return rust::String("");
+    }
+
+    // Get memory usage statistics as a formatted string
+    // Returns: "memtable_size,block_cache_usage,block_cache_pinned,table_readers_mem"
+    rust::String get_memory_stats() const {
+        DB *db_ = get_base_db();
+        std::string memtable_size, block_cache_usage, block_cache_pinned, table_readers_mem;
+
+        db_->GetProperty("rocksdb.cur-size-all-mem-tables", &memtable_size);
+        db_->GetProperty("rocksdb.block-cache-usage", &block_cache_usage);
+        db_->GetProperty("rocksdb.block-cache-pinned-usage", &block_cache_pinned);
+        db_->GetProperty("rocksdb.estimate-table-readers-mem", &table_readers_mem);
+
+        std::string result = memtable_size + "," + block_cache_usage + "," +
+                            block_cache_pinned + "," + table_readers_mem;
+        return rust::String(result);
+    }
+
     DB *get_base_db() const {
         return db->GetBaseDB();
     }

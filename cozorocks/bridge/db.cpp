@@ -58,23 +58,9 @@ static const size_t DEFAULT_MAX_TOTAL_WAL_SIZE_MB = 1024;
 static const size_t DEFAULT_RATE_LIMIT_MB_PER_SEC = 0;
 
 // Shared rate limiter - created once if enabled, used by all database instances
+// Note: Rate limiter disabled - API has changed between RocksDB versions
 static std::shared_ptr<RateLimiter> get_shared_rate_limiter() {
-    static std::shared_ptr<RateLimiter> shared_limiter = nullptr;
-    static bool initialized = false;
-    if (!initialized) {
-        initialized = true;
-        size_t rate_mb_per_sec = DEFAULT_RATE_LIMIT_MB_PER_SEC;
-        const char* env_rate = std::getenv("COZO_ROCKSDB_RATE_LIMIT_MB_PER_SEC");
-        if (env_rate != nullptr) {
-            rate_mb_per_sec = std::strtoul(env_rate, nullptr, 10);
-        }
-        if (rate_mb_per_sec > 0) {
-            // Rate in bytes/sec, refill period 100ms, fairness mode
-            shared_limiter = std::shared_ptr<RateLimiter>(
-                NewGenericRateLimiter(rate_mb_per_sec * 1024 * 1024));
-        }
-    }
-    return shared_limiter;
+    return nullptr;
 }
 
 // Shared block cache - created once, used by all database instances

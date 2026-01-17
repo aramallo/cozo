@@ -142,6 +142,10 @@ pub(crate) mod ffi {
             status: &mut RocksDbStatus,
         ) -> UniquePtr<SstFileWriterBridge>;
         fn ingest_sst(self: &RocksDbBridge, path: &str, status: &mut RocksDbStatus);
+        fn flush(self: &RocksDbBridge, status: &mut RocksDbStatus);
+        // get_property and get_memory_stats return rust::String which cxx maps to Rust String
+        unsafe fn get_property(self: &RocksDbBridge, property_name: &str) -> String;
+        unsafe fn get_memory_stats(self: &RocksDbBridge) -> String;
 
         type SstFileWriterBridge;
         fn put(

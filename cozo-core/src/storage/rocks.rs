@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use log::info;
 use miette::{miette, IntoDiagnostic, Result, WrapErr};
 
-use cozorocks::{DbBuilder, DbIter, RocksDb, Tx};
+use cozorocks::{DbBuilder, DbIter, RocksDb, RocksDbMemoryStats, Tx};
 
 use crate::data::tuple::{check_key_for_validity, Tuple};
 use crate::data::value::ValidityTs;
@@ -119,6 +119,16 @@ pub struct RocksDbStorage {
 impl RocksDbStorage {
     pub(crate) fn new(db: RocksDb) -> Self {
         Self { db }
+    }
+
+    /// Flush all memtables to disk
+    pub fn flush(&self) -> Result<()> {
+        self.db.flush().into_diagnostic()
+    }
+
+    /// Get RocksDB memory statistics
+    pub fn get_memory_stats(&self) -> RocksDbMemoryStats {
+        self.db.get_memory_stats()
     }
 }
 

@@ -195,6 +195,48 @@ impl RocksDb {
             Err(status)
         }
     }
+
+    /// Flush all memtables to disk
+    pub fn flush(&self) -> Result<(), RocksDbStatus> {
+        let mut status = RocksDbStatus::default();
+        self.inner.flush(&mut status);
+        if status.is_ok() {
+            Ok(())
+        } else {
+            Err(status)
+        }
+    }
+
+    /// Get a RocksDB property value
+    pub fn get_property(&self, name: &str) -> std::string::String {
+        unsafe { self.inner.get_property(name) }
+    }
+
+    /// Get memory usage statistics
+    /// Returns a struct with memtable_size, block_cache_usage, block_cache_pinned, table_readers_mem
+    pub fn get_memory_stats(&self) -> RocksDbMemoryStats {
+        let stats_str: std::string::String = unsafe { self.inner.get_memory_stats() };
+        let parts: Vec<&str> = stats_str.split(',').collect();
+        RocksDbMemoryStats {
+            memtable_size: parts.get(0).and_then(|s| s.parse().ok()).unwrap_or(0),
+            block_cache_usage: parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0),
+            block_cache_pinned: parts.get(2).and_then(|s| s.parse().ok()).unwrap_or(0),
+            table_readers_mem: parts.get(3).and_then(|s| s.parse().ok()).unwrap_or(0),
+        }
+    }
+}
+
+/// RocksDB memory usage statistics
+#[derive(Debug, Clone, Default)]
+pub struct RocksDbMemoryStats {
+    /// Current size of all memtables (active + immutable)
+    pub memtable_size: u64,
+    /// Block cache usage
+    pub block_cache_usage: u64,
+    /// Pinned entries in block cache
+    pub block_cache_pinned: u64,
+    /// Estimated memory used by table readers (index/filter blocks not in cache)
+    pub table_readers_mem: u64,
 }
 
 pub struct SstWriter {

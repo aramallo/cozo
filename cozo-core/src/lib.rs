@@ -580,6 +580,38 @@ impl DbInstance {
             receiver: db2app_recv,
         }
     }
+
+    /// Flush all memtables to disk (RocksDB only).
+    /// For other storage backends, this is a no-op.
+    #[cfg(feature = "storage-rocksdb")]
+    pub fn flush(&self) -> Result<()> {
+        match self {
+            DbInstance::RocksDb(db) => db.db.flush(),
+            _ => Ok(()),
+        }
+    }
+
+    /// Flush all memtables to disk (no-op when RocksDB is not enabled).
+    #[cfg(not(feature = "storage-rocksdb"))]
+    pub fn flush(&self) -> Result<()> {
+        Ok(())
+    }
+
+    /// Get RocksDB memory statistics (RocksDB only).
+    /// Returns None for other storage backends.
+    #[cfg(feature = "storage-rocksdb")]
+    pub fn get_rocksdb_memory_stats(&self) -> Option<cozorocks::RocksDbMemoryStats> {
+        match self {
+            DbInstance::RocksDb(db) => Some(db.db.get_memory_stats()),
+            _ => None,
+        }
+    }
+
+    /// Get RocksDB memory statistics (returns None when RocksDB is not enabled).
+    #[cfg(not(feature = "storage-rocksdb"))]
+    pub fn get_rocksdb_memory_stats(&self) -> Option<()> {
+        None
+    }
 }
 
 /// A multi-transaction handle.
