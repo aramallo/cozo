@@ -11,13 +11,26 @@
 #include "cozorocks/src/bridge/mod.rs.h"
 #include "rocksdb/utilities/options_util.h"
 
-// Default block cache size: 512 MB
+// Default block cache size: 2GB
 // Can be overridden via COZO_ROCKSDB_BLOCK_CACHE_MB environment variable
 static const size_t DEFAULT_BLOCK_CACHE_MB = 2048;
 
-// Default max open files (256 is reasonable for most workloads)
+// Default max open files
 // Can be overridden via COZO_ROCKSDB_MAX_OPEN_FILES environment variable
 static const int DEFAULT_MAX_OPEN_FILES = 5000;
+
+// Write buffer (memtable) settings - critical for controlling memory under write-heavy workloads
+// Default write buffer size: 32MB per memtable (RocksDB default is 64MB)
+// Can be overridden via COZO_ROCKSDB_WRITE_BUFFER_SIZE_MB environment variable
+static const size_t DEFAULT_WRITE_BUFFER_SIZE_MB = 32;
+
+// Maximum number of memtables (active + immutable) before stalling writes
+// Can be overridden via COZO_ROCKSDB_MAX_WRITE_BUFFER_NUMBER environment variable
+static const int DEFAULT_MAX_WRITE_BUFFER_NUMBER = 3;
+
+// Total memory budget for all memtables across the database (0 = unlimited)
+// Can be overridden via COZO_ROCKSDB_DB_WRITE_BUFFER_SIZE_MB environment variable
+static const size_t DEFAULT_DB_WRITE_BUFFER_SIZE_MB = 256;
 
 // Shared block cache - created once, used by all database instances
 static std::shared_ptr<Cache> get_shared_block_cache() {
@@ -42,6 +55,12 @@ Options default_db_options() {
     options.max_background_jobs = 6;
     options.bytes_per_sync = 1048576;
     options.compaction_pri = kMinOverlappingRatio;
+
+    // Write buffer settings for memory control
+    options.write_buffer_size = DEFAULT_WRITE_BUFFER_SIZE_MB * 1024 * 1024;
+    options.max_write_buffer_number = DEFAULT_MAX_WRITE_BUFFER_NUMBER;
+    options.db_write_buffer_size = DEFAULT_DB_WRITE_BUFFER_SIZE_MB * 1024 * 1024;
+
     BlockBasedTableOptions table_options;
     table_options.block_cache = get_shared_block_cache();
     table_options.block_size = 16 * 1024;
@@ -61,6 +80,10 @@ ColumnFamilyOptions default_cf_options() {
     options.compression = kLZ4Compression;
     options.level_compaction_dynamic_level_bytes = true;
     options.compaction_pri = kMinOverlappingRatio;
+
+    // Write buffer settings for memory control (per column family)
+    options.write_buffer_size = DEFAULT_WRITE_BUFFER_SIZE_MB * 1024 * 1024;
+    options.max_write_buffer_number = DEFAULT_MAX_WRITE_BUFFER_NUMBER;
 
     BlockBasedTableOptions table_options;
     table_options.block_cache = get_shared_block_cache();
@@ -118,6 +141,30 @@ shared_ptr <RocksDbBridge> open_db(const DbOpts &opts, RocksDbStatus &status) {
         options.max_open_files = std::atoi(env_max_files);
     } else {
         options.max_open_files = DEFAULT_MAX_OPEN_FILES;
+    }
+
+    // Write buffer (memtable) settings - override via environment variables
+    const char* env_write_buffer_size = std::getenv("COZO_ROCKSDB_WRITE_BUFFER_SIZE_MB");
+    if (env_write_buffer_size != nullptr) {
+        size_t size_mb = std::strtoul(env_write_buffer_size, nullptr, 10);
+        if (size_mb > 0) {
+            options.write_buffer_size = size_mb * 1024 * 1024;
+        }
+    }
+
+    const char* env_max_write_buffer_number = std::getenv("COZO_ROCKSDB_MAX_WRITE_BUFFER_NUMBER");
+    if (env_max_write_buffer_number != nullptr) {
+        int num = std::atoi(env_max_write_buffer_number);
+        if (num > 0) {
+            options.max_write_buffer_number = num;
+        }
+    }
+
+    const char* env_db_write_buffer_size = std::getenv("COZO_ROCKSDB_DB_WRITE_BUFFER_SIZE_MB");
+    if (env_db_write_buffer_size != nullptr) {
+        size_t size_mb = std::strtoul(env_db_write_buffer_size, nullptr, 10);
+        // 0 means unlimited, which is a valid value
+        options.db_write_buffer_size = size_mb * 1024 * 1024;
     }
 
     if (opts.enable_blob_files) {
