@@ -10,6 +10,7 @@
 #include "db.h"
 #include "cozorocks/src/bridge/mod.rs.h"
 #include "rocksdb/utilities/options_util.h"
+#include "rocksdb/rate_limiter.h"
 
 // Default block cache size: 2GB
 // Can be overridden via COZO_ROCKSDB_BLOCK_CACHE_MB environment variable
@@ -32,6 +33,49 @@ static const int DEFAULT_MAX_WRITE_BUFFER_NUMBER = 3;
 // Can be overridden via COZO_ROCKSDB_DB_WRITE_BUFFER_SIZE_MB environment variable
 static const size_t DEFAULT_DB_WRITE_BUFFER_SIZE_MB = 256;
 
+// Compaction backpressure settings - prevents runaway memory growth under heavy writes
+// Soft limit: writes slow down when pending compaction bytes exceed this (default 64GB)
+// Can be overridden via COZO_ROCKSDB_SOFT_PENDING_COMPACTION_GB environment variable
+static const size_t DEFAULT_SOFT_PENDING_COMPACTION_GB = 64;
+
+// Hard limit: writes stop when pending compaction bytes exceed this (default 256GB)
+// Can be overridden via COZO_ROCKSDB_HARD_PENDING_COMPACTION_GB environment variable
+static const size_t DEFAULT_HARD_PENDING_COMPACTION_GB = 256;
+
+// L0 file count triggers - controls write stalls based on L0 file accumulation
+// Slowdown trigger: start slowing writes (default 20 files)
+static const int DEFAULT_LEVEL0_SLOWDOWN_WRITES_TRIGGER = 20;
+// Stop trigger: stop writes entirely (default 36 files)
+static const int DEFAULT_LEVEL0_STOP_WRITES_TRIGGER = 36;
+
+// WAL size limit - triggers memtable flush when total WAL size exceeds this (default 1GB)
+// Can be overridden via COZO_ROCKSDB_MAX_TOTAL_WAL_SIZE_MB environment variable
+static const size_t DEFAULT_MAX_TOTAL_WAL_SIZE_MB = 1024;
+
+// Rate limiter for compaction/flush I/O (0 = disabled, value in MB/s)
+// Can be overridden via COZO_ROCKSDB_RATE_LIMIT_MB_PER_SEC environment variable
+static const size_t DEFAULT_RATE_LIMIT_MB_PER_SEC = 0;
+
+// Shared rate limiter - created once if enabled, used by all database instances
+static std::shared_ptr<RateLimiter> get_shared_rate_limiter() {
+    static std::shared_ptr<RateLimiter> shared_limiter = nullptr;
+    static bool initialized = false;
+    if (!initialized) {
+        initialized = true;
+        size_t rate_mb_per_sec = DEFAULT_RATE_LIMIT_MB_PER_SEC;
+        const char* env_rate = std::getenv("COZO_ROCKSDB_RATE_LIMIT_MB_PER_SEC");
+        if (env_rate != nullptr) {
+            rate_mb_per_sec = std::strtoul(env_rate, nullptr, 10);
+        }
+        if (rate_mb_per_sec > 0) {
+            // Rate in bytes/sec, refill period 100ms, fairness mode
+            shared_limiter = std::shared_ptr<RateLimiter>(
+                NewGenericRateLimiter(rate_mb_per_sec * 1024 * 1024));
+        }
+    }
+    return shared_limiter;
+}
+
 // Shared block cache - created once, used by all database instances
 static std::shared_ptr<Cache> get_shared_block_cache() {
     static std::shared_ptr<Cache> shared_cache = nullptr;
@@ -49,24 +93,45 @@ static std::shared_ptr<Cache> get_shared_block_cache() {
 
 Options default_db_options() {
     Options options = Options();
-    options.bottommost_compression = kZSTD;
+    // Use LZ4 for all levels - good balance of speed and compression for range queries
     options.compression = kLZ4Compression;
+    options.bottommost_compression = kLZ4Compression;
     options.level_compaction_dynamic_level_bytes = true;
     options.max_background_jobs = 6;
     options.bytes_per_sync = 1048576;
     options.compaction_pri = kMinOverlappingRatio;
+    // Readahead for compaction - improves I/O efficiency on HDDs and network storage
+    options.compaction_readahead_size = 2 * 1024 * 1024;  // 2MB
 
     // Write buffer settings for memory control
     options.write_buffer_size = DEFAULT_WRITE_BUFFER_SIZE_MB * 1024 * 1024;
     options.max_write_buffer_number = DEFAULT_MAX_WRITE_BUFFER_NUMBER;
     options.db_write_buffer_size = DEFAULT_DB_WRITE_BUFFER_SIZE_MB * 1024 * 1024;
 
+    // Compaction backpressure - prevents runaway memory growth
+    options.soft_pending_compaction_bytes_limit = DEFAULT_SOFT_PENDING_COMPACTION_GB * 1024ULL * 1024ULL * 1024ULL;
+    options.hard_pending_compaction_bytes_limit = DEFAULT_HARD_PENDING_COMPACTION_GB * 1024ULL * 1024ULL * 1024ULL;
+    options.level0_slowdown_writes_trigger = DEFAULT_LEVEL0_SLOWDOWN_WRITES_TRIGGER;
+    options.level0_stop_writes_trigger = DEFAULT_LEVEL0_STOP_WRITES_TRIGGER;
+
+    // WAL size limit - triggers flush to prevent unbounded WAL growth
+    options.max_total_wal_size = DEFAULT_MAX_TOTAL_WAL_SIZE_MB * 1024 * 1024;
+    options.wal_bytes_per_sync = 1048576;  // 1MB - periodic WAL sync for durability
+
+    // Rate limiter (if enabled via environment variable)
+    auto rate_limiter = get_shared_rate_limiter();
+    if (rate_limiter) {
+        options.rate_limiter = rate_limiter;
+    }
+
     BlockBasedTableOptions table_options;
     table_options.block_cache = get_shared_block_cache();
-    table_options.block_size = 16 * 1024;
+    table_options.block_size = 32 * 1024;  // 32KB - optimized for range queries
     table_options.cache_index_and_filter_blocks = true;
     table_options.pin_l0_filter_and_index_blocks_in_cache = true;
     table_options.format_version = 6;
+    // Use Ribbon filters instead of Bloom - more memory efficient with similar performance
+    table_options.optimize_filters_for_memory = true;
 
     auto table_factory = NewBlockBasedTableFactory(table_options);
     options.table_factory.reset(table_factory);
@@ -76,8 +141,9 @@ Options default_db_options() {
 
 ColumnFamilyOptions default_cf_options() {
     ColumnFamilyOptions options = ColumnFamilyOptions();
-    options.bottommost_compression = kZSTD;
+    // Use LZ4 for all levels - good balance of speed and compression for range queries
     options.compression = kLZ4Compression;
+    options.bottommost_compression = kLZ4Compression;
     options.level_compaction_dynamic_level_bytes = true;
     options.compaction_pri = kMinOverlappingRatio;
 
@@ -85,12 +151,20 @@ ColumnFamilyOptions default_cf_options() {
     options.write_buffer_size = DEFAULT_WRITE_BUFFER_SIZE_MB * 1024 * 1024;
     options.max_write_buffer_number = DEFAULT_MAX_WRITE_BUFFER_NUMBER;
 
+    // Compaction backpressure (per column family)
+    options.soft_pending_compaction_bytes_limit = DEFAULT_SOFT_PENDING_COMPACTION_GB * 1024ULL * 1024ULL * 1024ULL;
+    options.hard_pending_compaction_bytes_limit = DEFAULT_HARD_PENDING_COMPACTION_GB * 1024ULL * 1024ULL * 1024ULL;
+    options.level0_slowdown_writes_trigger = DEFAULT_LEVEL0_SLOWDOWN_WRITES_TRIGGER;
+    options.level0_stop_writes_trigger = DEFAULT_LEVEL0_STOP_WRITES_TRIGGER;
+
     BlockBasedTableOptions table_options;
     table_options.block_cache = get_shared_block_cache();
-    table_options.block_size = 16 * 1024;
+    table_options.block_size = 32 * 1024;  // 32KB - optimized for range queries
     table_options.cache_index_and_filter_blocks = true;
     table_options.pin_l0_filter_and_index_blocks_in_cache = true;
     table_options.format_version = 6;
+    // Use Ribbon filters instead of Bloom - more memory efficient with similar performance
+    table_options.optimize_filters_for_memory = true;
 
     auto table_factory = NewBlockBasedTableFactory(table_options);
     options.table_factory.reset(table_factory);
@@ -167,6 +241,32 @@ shared_ptr <RocksDbBridge> open_db(const DbOpts &opts, RocksDbStatus &status) {
         options.db_write_buffer_size = size_mb * 1024 * 1024;
     }
 
+    // Compaction backpressure overrides
+    const char* env_soft_pending = std::getenv("COZO_ROCKSDB_SOFT_PENDING_COMPACTION_GB");
+    if (env_soft_pending != nullptr) {
+        size_t size_gb = std::strtoul(env_soft_pending, nullptr, 10);
+        if (size_gb > 0) {
+            options.soft_pending_compaction_bytes_limit = size_gb * 1024ULL * 1024ULL * 1024ULL;
+        }
+    }
+
+    const char* env_hard_pending = std::getenv("COZO_ROCKSDB_HARD_PENDING_COMPACTION_GB");
+    if (env_hard_pending != nullptr) {
+        size_t size_gb = std::strtoul(env_hard_pending, nullptr, 10);
+        if (size_gb > 0) {
+            options.hard_pending_compaction_bytes_limit = size_gb * 1024ULL * 1024ULL * 1024ULL;
+        }
+    }
+
+    // WAL size limit override
+    const char* env_max_wal_size = std::getenv("COZO_ROCKSDB_MAX_TOTAL_WAL_SIZE_MB");
+    if (env_max_wal_size != nullptr) {
+        size_t size_mb = std::strtoul(env_max_wal_size, nullptr, 10);
+        if (size_mb > 0) {
+            options.max_total_wal_size = size_mb * 1024 * 1024;
+        }
+    }
+
     if (opts.enable_blob_files) {
         options.enable_blob_files = true;
 
@@ -183,6 +283,8 @@ shared_ptr <RocksDbBridge> open_db(const DbOpts &opts, RocksDbStatus &status) {
         table_options.whole_key_filtering = opts.bloom_filter_whole_key_filtering;
         table_options.cache_index_and_filter_blocks = true;
         table_options.pin_l0_filter_and_index_blocks_in_cache = true;
+        table_options.format_version = 6;
+        table_options.optimize_filters_for_memory = true;
         options.table_factory.reset(NewBlockBasedTableFactory(table_options));
     }
     if (opts.use_capped_prefix_extractor) {
