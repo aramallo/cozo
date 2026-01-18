@@ -1,11 +1,131 @@
+/*
+ * Copyright 2022, The Cozo Project Authors.
+ *
+ * This Source Code Form is subject to the terms of the Mozilla Public License, v. 2.0.
+ * If a copy of the MPL was not distributed with this file,
+ * You can obtain one at https://mozilla.org/MPL/2.0/.
+ */
+
+//! RocksDB storage backend using the official rust-rocksdb crate.
+//!
+//! This backend supports comprehensive configuration via environment variables.
+//! All options are prefixed with `COZO_ROCKSDB_`.
+//!
+//! # Environment Variables
+//!
+//! ## General Options
+//! - `COZO_ROCKSDB_CREATE_IF_MISSING` - Create database if it doesn't exist (default: true for new dbs)
+//! - `COZO_ROCKSDB_CREATE_MISSING_COLUMN_FAMILIES` - Create missing column families (default: false)
+//! - `COZO_ROCKSDB_ERROR_IF_EXISTS` - Error if database already exists (default: false)
+//! - `COZO_ROCKSDB_PARANOID_CHECKS` - Enable aggressive data validation (default: false)
+//! - `COZO_ROCKSDB_MAX_OPEN_FILES` - Maximum number of open files (default: -1, unlimited)
+//! - `COZO_ROCKSDB_MAX_FILE_OPENING_THREADS` - Threads for opening files (default: 16)
+//! - `COZO_ROCKSDB_NUM_LEVELS` - Number of LSM levels (default: 7)
+//!
+//! ## Parallelism & Background Jobs
+//! - `COZO_ROCKSDB_INCREASE_PARALLELISM` - Set total background threads (default: num_cpus)
+//! - `COZO_ROCKSDB_MAX_BACKGROUND_JOBS` - Maximum background jobs (default: 2)
+//! - `COZO_ROCKSDB_MAX_SUBCOMPACTIONS` - Parallel compaction threads (default: 1)
+//!
+//! ## Write Buffer (Memtable)
+//! - `COZO_ROCKSDB_WRITE_BUFFER_SIZE` - Size of single memtable in bytes (default: 64MB)
+//! - `COZO_ROCKSDB_MAX_WRITE_BUFFER_NUMBER` - Maximum number of memtables (default: 2)
+//! - `COZO_ROCKSDB_MIN_WRITE_BUFFER_NUMBER_TO_MERGE` - Minimum memtables to merge (default: 1)
+//! - `COZO_ROCKSDB_DB_WRITE_BUFFER_SIZE` - Total write buffer size across column families (default: 0, disabled)
+//!
+//! ## Compaction
+//! - `COZO_ROCKSDB_COMPACTION_STYLE` - Compaction style: level, universal, fifo (default: level)
+//! - `COZO_ROCKSDB_DISABLE_AUTO_COMPACTIONS` - Disable automatic compaction (default: false)
+//! - `COZO_ROCKSDB_LEVEL0_FILE_NUM_COMPACTION_TRIGGER` - L0 files to trigger compaction (default: 4)
+//! - `COZO_ROCKSDB_LEVEL0_SLOWDOWN_WRITES_TRIGGER` - L0 files to slow down writes (default: 20)
+//! - `COZO_ROCKSDB_LEVEL0_STOP_WRITES_TRIGGER` - L0 files to stop writes (default: 36)
+//! - `COZO_ROCKSDB_MAX_BYTES_FOR_LEVEL_BASE` - Max bytes for level 1 (default: 256MB)
+//! - `COZO_ROCKSDB_MAX_BYTES_FOR_LEVEL_MULTIPLIER` - Level size multiplier (default: 10.0)
+//! - `COZO_ROCKSDB_TARGET_FILE_SIZE_BASE` - Target file size for level 1 (default: 64MB)
+//! - `COZO_ROCKSDB_TARGET_FILE_SIZE_MULTIPLIER` - File size multiplier per level (default: 1)
+//! - `COZO_ROCKSDB_MAX_COMPACTION_BYTES` - Max bytes per compaction (default: 0, disabled)
+//! - `COZO_ROCKSDB_COMPACTION_READAHEAD_SIZE` - Readahead for compaction (default: 0)
+//! - `COZO_ROCKSDB_LEVEL_COMPACTION_DYNAMIC_LEVEL_BYTES` - Dynamic level sizing (default: false)
+//! - `COZO_ROCKSDB_PERIODIC_COMPACTION_SECONDS` - Periodic recompaction interval (default: 0, disabled)
+//!
+//! ## Compression
+//! - `COZO_ROCKSDB_COMPRESSION_TYPE` - Compression: none, snappy, zlib, bz2, lz4, lz4hc, zstd (default: lz4)
+//! - `COZO_ROCKSDB_BOTTOMMOST_COMPRESSION_TYPE` - Bottom level compression (default: zstd)
+//! - `COZO_ROCKSDB_COMPRESSION_LEVEL` - Compression level (default: depends on algorithm)
+//! - `COZO_ROCKSDB_ZSTD_MAX_TRAIN_BYTES` - Zstd dictionary training bytes (default: 0)
+//!
+//! ## Block-Based Table Options
+//! - `COZO_ROCKSDB_BLOCK_SIZE` - Block size in bytes (default: 4KB)
+//! - `COZO_ROCKSDB_BLOCK_CACHE_SIZE` - Block cache size in bytes (default: 8MB)
+//! - `COZO_ROCKSDB_DISABLE_BLOCK_CACHE` - Disable block cache (default: false)
+//! - `COZO_ROCKSDB_BLOOM_FILTER_BITS_PER_KEY` - Bloom filter bits per key (default: 10.0)
+//! - `COZO_ROCKSDB_BLOOM_FILTER_BLOCK_BASED` - Use block-based bloom filter (default: false)
+//! - `COZO_ROCKSDB_CACHE_INDEX_AND_FILTER_BLOCKS` - Cache index/filter in block cache (default: true)
+//! - `COZO_ROCKSDB_PIN_L0_FILTER_AND_INDEX_BLOCKS` - Pin L0 index/filter in cache (default: true)
+//! - `COZO_ROCKSDB_OPTIMIZE_FILTERS_FOR_HITS` - Optimize bloom for read hits (default: false)
+//! - `COZO_ROCKSDB_WHOLE_KEY_FILTERING` - Enable whole key filtering (default: true)
+//! - `COZO_ROCKSDB_FORMAT_VERSION` - Table format version (default: 5)
+//!
+//! ## Prefix Extractor
+//! - `COZO_ROCKSDB_PREFIX_EXTRACTOR_LENGTH` - Fixed prefix length for prefix bloom (default: 9)
+//!
+//! ## Blob Storage
+//! - `COZO_ROCKSDB_ENABLE_BLOB_FILES` - Enable blob storage (default: false)
+//! - `COZO_ROCKSDB_MIN_BLOB_SIZE` - Minimum size to store as blob (default: 0)
+//! - `COZO_ROCKSDB_BLOB_FILE_SIZE` - Target blob file size (default: 256MB)
+//! - `COZO_ROCKSDB_BLOB_COMPRESSION_TYPE` - Blob compression type (default: none)
+//! - `COZO_ROCKSDB_ENABLE_BLOB_GC` - Enable blob garbage collection (default: true)
+//! - `COZO_ROCKSDB_BLOB_GC_AGE_CUTOFF` - Blob GC age cutoff (default: 0.25)
+//! - `COZO_ROCKSDB_BLOB_GC_FORCE_THRESHOLD` - Blob GC force threshold (default: 1.0)
+//!
+//! ## WAL (Write-Ahead Log)
+//! - `COZO_ROCKSDB_WAL_DIR` - WAL directory path (default: same as db)
+//! - `COZO_ROCKSDB_WAL_TTL_SECONDS` - WAL file TTL (default: 0, disabled)
+//! - `COZO_ROCKSDB_WAL_SIZE_LIMIT_MB` - WAL size limit (default: 0, disabled)
+//! - `COZO_ROCKSDB_MAX_TOTAL_WAL_SIZE` - Max total WAL size (default: 0, auto)
+//! - `COZO_ROCKSDB_WAL_BYTES_PER_SYNC` - WAL sync granularity (default: 0)
+//! - `COZO_ROCKSDB_MANUAL_WAL_FLUSH` - Manual WAL flushing (default: false)
+//!
+//! ## I/O Options
+//! - `COZO_ROCKSDB_USE_FSYNC` - Use fsync instead of fdatasync (default: false)
+//! - `COZO_ROCKSDB_USE_DIRECT_READS` - Direct I/O for reads (default: false)
+//! - `COZO_ROCKSDB_USE_DIRECT_IO_FOR_FLUSH_AND_COMPACTION` - Direct I/O for writes (default: false)
+//! - `COZO_ROCKSDB_ALLOW_MMAP_READS` - Memory-map file reading (default: false)
+//! - `COZO_ROCKSDB_ALLOW_MMAP_WRITES` - Memory-map file writing (default: false)
+//! - `COZO_ROCKSDB_BYTES_PER_SYNC` - Data file sync granularity (default: 0)
+//! - `COZO_ROCKSDB_WRITABLE_FILE_MAX_BUFFER_SIZE` - Write buffer size (default: 1MB)
+//!
+//! ## Concurrency
+//! - `COZO_ROCKSDB_ALLOW_CONCURRENT_MEMTABLE_WRITE` - Parallel memtable writes (default: true)
+//! - `COZO_ROCKSDB_ENABLE_WRITE_THREAD_ADAPTIVE_YIELD` - Write thread yielding (default: true)
+//! - `COZO_ROCKSDB_ENABLE_PIPELINED_WRITE` - Pipelined write queues (default: false)
+//! - `COZO_ROCKSDB_UNORDERED_WRITE` - Unordered write mode (default: false)
+//!
+//! ## Statistics & Logging
+//! - `COZO_ROCKSDB_ENABLE_STATISTICS` - Enable statistics collection (default: false)
+//! - `COZO_ROCKSDB_STATS_DUMP_PERIOD_SEC` - Stats dump frequency (default: 600)
+//! - `COZO_ROCKSDB_LOG_LEVEL` - Log level: debug, info, warn, error, fatal, header (default: info)
+//! - `COZO_ROCKSDB_MAX_LOG_FILE_SIZE` - Max log file size (default: 0, unlimited)
+//! - `COZO_ROCKSDB_KEEP_LOG_FILE_NUM` - Log files to keep (default: 1000)
+//!
+//! ## Optimization Presets
+//! - `COZO_ROCKSDB_OPTIMIZE_LEVEL_STYLE_COMPACTION` - Optimize for leveled compaction with memtable budget (bytes)
+//! - `COZO_ROCKSDB_OPTIMIZE_UNIVERSAL_STYLE_COMPACTION` - Optimize for universal compaction with memtable budget (bytes)
+//! - `COZO_ROCKSDB_OPTIMIZE_FOR_POINT_LOOKUP` - Optimize for point lookups with block cache size (bytes)
+//! - `COZO_ROCKSDB_PREPARE_FOR_BULK_LOAD` - Prepare for bulk loading (default: false)
+
+use std::env;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 
 use log::info;
 use miette::{miette, IntoDiagnostic, Result, WrapErr};
 
-use rocksdb::{OptimisticTransactionDB, Options, WriteBatchWithTransaction, DB};
+use rocksdb::{
+    BlockBasedOptions, Cache, DBCompactionStyle, DBCompressionType,
+    OptimisticTransactionDB, Options, SliceTransform, WriteBatchWithTransaction,
+};
 
 use crate::data::tuple::{check_key_for_validity, Tuple};
 use crate::data::value::ValidityTs;
@@ -17,10 +137,301 @@ use crate::Db;
 const KEY_PREFIX_LEN: usize = 9;
 const CURRENT_STORAGE_VERSION: u64 = 3;
 
-/// Creates a RocksDB database object.
-/// This is currently the fastest persistent storage and it can
-/// sustain huge concurrency.
-/// Supports concurrent readers and writers.
+// =============================================================================
+// Environment Variable Helpers
+// =============================================================================
+
+fn env_var<T: std::str::FromStr>(name: &str, default: T) -> T {
+    env::var(name)
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(default)
+}
+
+fn env_var_opt<T: std::str::FromStr>(name: &str) -> Option<T> {
+    env::var(name).ok().and_then(|v| v.parse().ok())
+}
+
+fn env_bool(name: &str, default: bool) -> bool {
+    env::var(name)
+        .map(|v| v == "true" || v == "1" || v == "yes")
+        .unwrap_or(default)
+}
+
+fn env_string(name: &str) -> Option<String> {
+    env::var(name).ok().filter(|s| !s.is_empty())
+}
+
+fn parse_compression_type(s: &str) -> DBCompressionType {
+    match s.to_lowercase().as_str() {
+        "none" => DBCompressionType::None,
+        "snappy" => DBCompressionType::Snappy,
+        "zlib" => DBCompressionType::Zlib,
+        "bz2" => DBCompressionType::Bz2,
+        "lz4" => DBCompressionType::Lz4,
+        "lz4hc" => DBCompressionType::Lz4hc,
+        "zstd" => DBCompressionType::Zstd,
+        _ => DBCompressionType::Lz4,
+    }
+}
+
+fn parse_compaction_style(s: &str) -> DBCompactionStyle {
+    match s.to_lowercase().as_str() {
+        "level" => DBCompactionStyle::Level,
+        "universal" => DBCompactionStyle::Universal,
+        "fifo" => DBCompactionStyle::Fifo,
+        _ => DBCompactionStyle::Level,
+    }
+}
+
+// =============================================================================
+// Configuration
+// =============================================================================
+
+/// Builds RocksDB Options from environment variables
+fn build_options(is_new: bool) -> Options {
+    let mut options = Options::default();
+
+    // === General Options ===
+    options.create_if_missing(env_bool("COZO_ROCKSDB_CREATE_IF_MISSING", is_new));
+    options.create_missing_column_families(env_bool("COZO_ROCKSDB_CREATE_MISSING_COLUMN_FAMILIES", false));
+    options.set_error_if_exists(env_bool("COZO_ROCKSDB_ERROR_IF_EXISTS", false));
+    options.set_paranoid_checks(env_bool("COZO_ROCKSDB_PARANOID_CHECKS", false));
+
+    if let Some(max_open_files) = env_var_opt::<i32>("COZO_ROCKSDB_MAX_OPEN_FILES") {
+        options.set_max_open_files(max_open_files);
+    }
+    if let Some(threads) = env_var_opt::<i32>("COZO_ROCKSDB_MAX_FILE_OPENING_THREADS") {
+        options.set_max_file_opening_threads(threads);
+    }
+    if let Some(levels) = env_var_opt::<i32>("COZO_ROCKSDB_NUM_LEVELS") {
+        options.set_num_levels(levels);
+    }
+
+    // === Optimization Presets (apply before other settings so they can be overridden) ===
+    if let Some(budget) = env_var_opt::<usize>("COZO_ROCKSDB_OPTIMIZE_LEVEL_STYLE_COMPACTION") {
+        options.optimize_level_style_compaction(budget);
+    }
+    if let Some(budget) = env_var_opt::<usize>("COZO_ROCKSDB_OPTIMIZE_UNIVERSAL_STYLE_COMPACTION") {
+        options.optimize_universal_style_compaction(budget);
+    }
+    if let Some(cache_size) = env_var_opt::<u64>("COZO_ROCKSDB_OPTIMIZE_FOR_POINT_LOOKUP") {
+        options.optimize_for_point_lookup(cache_size);
+    }
+    if env_bool("COZO_ROCKSDB_PREPARE_FOR_BULK_LOAD", false) {
+        options.prepare_for_bulk_load();
+    }
+
+    // === Parallelism & Background Jobs ===
+    if let Some(parallelism) = env_var_opt::<i32>("COZO_ROCKSDB_INCREASE_PARALLELISM") {
+        options.increase_parallelism(parallelism);
+    }
+    if let Some(jobs) = env_var_opt::<i32>("COZO_ROCKSDB_MAX_BACKGROUND_JOBS") {
+        options.set_max_background_jobs(jobs);
+    }
+    if let Some(subcompactions) = env_var_opt::<u32>("COZO_ROCKSDB_MAX_SUBCOMPACTIONS") {
+        options.set_max_subcompactions(subcompactions);
+    }
+
+    // === Write Buffer (Memtable) ===
+    if let Some(size) = env_var_opt::<usize>("COZO_ROCKSDB_WRITE_BUFFER_SIZE") {
+        options.set_write_buffer_size(size);
+    }
+    if let Some(num) = env_var_opt::<i32>("COZO_ROCKSDB_MAX_WRITE_BUFFER_NUMBER") {
+        options.set_max_write_buffer_number(num);
+    }
+    if let Some(num) = env_var_opt::<i32>("COZO_ROCKSDB_MIN_WRITE_BUFFER_NUMBER_TO_MERGE") {
+        options.set_min_write_buffer_number_to_merge(num);
+    }
+    if let Some(size) = env_var_opt::<usize>("COZO_ROCKSDB_DB_WRITE_BUFFER_SIZE") {
+        options.set_db_write_buffer_size(size);
+    }
+
+    // === Compaction ===
+    if let Some(style) = env_string("COZO_ROCKSDB_COMPACTION_STYLE") {
+        options.set_compaction_style(parse_compaction_style(&style));
+    }
+    options.set_disable_auto_compactions(env_bool("COZO_ROCKSDB_DISABLE_AUTO_COMPACTIONS", false));
+
+    if let Some(trigger) = env_var_opt::<i32>("COZO_ROCKSDB_LEVEL0_FILE_NUM_COMPACTION_TRIGGER") {
+        options.set_level_zero_file_num_compaction_trigger(trigger);
+    }
+    if let Some(trigger) = env_var_opt::<i32>("COZO_ROCKSDB_LEVEL0_SLOWDOWN_WRITES_TRIGGER") {
+        options.set_level_zero_slowdown_writes_trigger(trigger);
+    }
+    if let Some(trigger) = env_var_opt::<i32>("COZO_ROCKSDB_LEVEL0_STOP_WRITES_TRIGGER") {
+        options.set_level_zero_stop_writes_trigger(trigger);
+    }
+    if let Some(bytes) = env_var_opt::<u64>("COZO_ROCKSDB_MAX_BYTES_FOR_LEVEL_BASE") {
+        options.set_max_bytes_for_level_base(bytes);
+    }
+    if let Some(mult) = env_var_opt::<f64>("COZO_ROCKSDB_MAX_BYTES_FOR_LEVEL_MULTIPLIER") {
+        options.set_max_bytes_for_level_multiplier(mult);
+    }
+    if let Some(size) = env_var_opt::<u64>("COZO_ROCKSDB_TARGET_FILE_SIZE_BASE") {
+        options.set_target_file_size_base(size);
+    }
+    if let Some(mult) = env_var_opt::<i32>("COZO_ROCKSDB_TARGET_FILE_SIZE_MULTIPLIER") {
+        options.set_target_file_size_multiplier(mult);
+    }
+    if let Some(bytes) = env_var_opt::<u64>("COZO_ROCKSDB_MAX_COMPACTION_BYTES") {
+        options.set_max_compaction_bytes(bytes);
+    }
+    if let Some(size) = env_var_opt::<usize>("COZO_ROCKSDB_COMPACTION_READAHEAD_SIZE") {
+        options.set_compaction_readahead_size(size);
+    }
+    options.set_level_compaction_dynamic_level_bytes(
+        env_bool("COZO_ROCKSDB_LEVEL_COMPACTION_DYNAMIC_LEVEL_BYTES", false)
+    );
+    if let Some(secs) = env_var_opt::<u64>("COZO_ROCKSDB_PERIODIC_COMPACTION_SECONDS") {
+        options.set_periodic_compaction_seconds(secs);
+    }
+
+    // === Compression ===
+    if let Some(comp) = env_string("COZO_ROCKSDB_COMPRESSION_TYPE") {
+        options.set_compression_type(parse_compression_type(&comp));
+    }
+    if let Some(comp) = env_string("COZO_ROCKSDB_BOTTOMMOST_COMPRESSION_TYPE") {
+        options.set_bottommost_compression_type(parse_compression_type(&comp));
+    }
+    if let Some(bytes) = env_var_opt::<i32>("COZO_ROCKSDB_ZSTD_MAX_TRAIN_BYTES") {
+        options.set_zstd_max_train_bytes(bytes);
+    }
+
+    // === Prefix Extractor ===
+    let prefix_len = env_var("COZO_ROCKSDB_PREFIX_EXTRACTOR_LENGTH", KEY_PREFIX_LEN);
+    options.set_prefix_extractor(SliceTransform::create_fixed_prefix(prefix_len));
+
+    // === Block-Based Table Options ===
+    let mut block_opts = BlockBasedOptions::default();
+
+    if let Some(size) = env_var_opt::<usize>("COZO_ROCKSDB_BLOCK_SIZE") {
+        block_opts.set_block_size(size);
+    }
+
+    if env_bool("COZO_ROCKSDB_DISABLE_BLOCK_CACHE", false) {
+        block_opts.disable_cache();
+    } else if let Some(cache_size) = env_var_opt::<usize>("COZO_ROCKSDB_BLOCK_CACHE_SIZE") {
+        let cache = Cache::new_lru_cache(cache_size);
+        block_opts.set_block_cache(&cache);
+    }
+
+    let bloom_bits = env_var("COZO_ROCKSDB_BLOOM_FILTER_BITS_PER_KEY", 10.0_f64);
+    let bloom_block_based = env_bool("COZO_ROCKSDB_BLOOM_FILTER_BLOCK_BASED", false);
+    block_opts.set_bloom_filter(bloom_bits, bloom_block_based);
+
+    block_opts.set_cache_index_and_filter_blocks(
+        env_bool("COZO_ROCKSDB_CACHE_INDEX_AND_FILTER_BLOCKS", true)
+    );
+    block_opts.set_pin_l0_filter_and_index_blocks_in_cache(
+        env_bool("COZO_ROCKSDB_PIN_L0_FILTER_AND_INDEX_BLOCKS", true)
+    );
+    block_opts.set_whole_key_filtering(
+        env_bool("COZO_ROCKSDB_WHOLE_KEY_FILTERING", true)
+    );
+
+    if let Some(version) = env_var_opt::<i32>("COZO_ROCKSDB_FORMAT_VERSION") {
+        block_opts.set_format_version(version);
+    }
+
+    options.set_block_based_table_factory(&block_opts);
+    options.set_optimize_filters_for_hits(
+        env_bool("COZO_ROCKSDB_OPTIMIZE_FILTERS_FOR_HITS", false)
+    );
+
+    // === Blob Storage ===
+    if env_bool("COZO_ROCKSDB_ENABLE_BLOB_FILES", false) {
+        options.set_enable_blob_files(true);
+        if let Some(size) = env_var_opt::<u64>("COZO_ROCKSDB_MIN_BLOB_SIZE") {
+            options.set_min_blob_size(size);
+        }
+        if let Some(size) = env_var_opt::<u64>("COZO_ROCKSDB_BLOB_FILE_SIZE") {
+            options.set_blob_file_size(size);
+        }
+        if let Some(comp) = env_string("COZO_ROCKSDB_BLOB_COMPRESSION_TYPE") {
+            options.set_blob_compression_type(parse_compression_type(&comp));
+        }
+        options.set_enable_blob_gc(env_bool("COZO_ROCKSDB_ENABLE_BLOB_GC", true));
+        if let Some(cutoff) = env_var_opt::<f64>("COZO_ROCKSDB_BLOB_GC_AGE_CUTOFF") {
+            options.set_blob_gc_age_cutoff(cutoff);
+        }
+        if let Some(threshold) = env_var_opt::<f64>("COZO_ROCKSDB_BLOB_GC_FORCE_THRESHOLD") {
+            options.set_blob_gc_force_threshold(threshold);
+        }
+    }
+
+    // === WAL (Write-Ahead Log) ===
+    if let Some(dir) = env_string("COZO_ROCKSDB_WAL_DIR") {
+        options.set_wal_dir(&dir);
+    }
+    if let Some(ttl) = env_var_opt::<u64>("COZO_ROCKSDB_WAL_TTL_SECONDS") {
+        options.set_wal_ttl_seconds(ttl);
+    }
+    if let Some(limit) = env_var_opt::<u64>("COZO_ROCKSDB_WAL_SIZE_LIMIT_MB") {
+        options.set_wal_size_limit_mb(limit);
+    }
+    if let Some(size) = env_var_opt::<u64>("COZO_ROCKSDB_MAX_TOTAL_WAL_SIZE") {
+        options.set_max_total_wal_size(size);
+    }
+    if let Some(bytes) = env_var_opt::<u64>("COZO_ROCKSDB_WAL_BYTES_PER_SYNC") {
+        options.set_wal_bytes_per_sync(bytes);
+    }
+    options.set_manual_wal_flush(env_bool("COZO_ROCKSDB_MANUAL_WAL_FLUSH", false));
+
+    // === I/O Options ===
+    options.set_use_fsync(env_bool("COZO_ROCKSDB_USE_FSYNC", false));
+    options.set_use_direct_reads(env_bool("COZO_ROCKSDB_USE_DIRECT_READS", false));
+    options.set_use_direct_io_for_flush_and_compaction(
+        env_bool("COZO_ROCKSDB_USE_DIRECT_IO_FOR_FLUSH_AND_COMPACTION", false)
+    );
+    options.set_allow_mmap_reads(env_bool("COZO_ROCKSDB_ALLOW_MMAP_READS", false));
+    options.set_allow_mmap_writes(env_bool("COZO_ROCKSDB_ALLOW_MMAP_WRITES", false));
+    if let Some(bytes) = env_var_opt::<u64>("COZO_ROCKSDB_BYTES_PER_SYNC") {
+        options.set_bytes_per_sync(bytes);
+    }
+    if let Some(size) = env_var_opt::<u64>("COZO_ROCKSDB_WRITABLE_FILE_MAX_BUFFER_SIZE") {
+        options.set_writable_file_max_buffer_size(size);
+    }
+
+    // === Concurrency ===
+    options.set_allow_concurrent_memtable_write(
+        env_bool("COZO_ROCKSDB_ALLOW_CONCURRENT_MEMTABLE_WRITE", true)
+    );
+    options.set_enable_write_thread_adaptive_yield(
+        env_bool("COZO_ROCKSDB_ENABLE_WRITE_THREAD_ADAPTIVE_YIELD", true)
+    );
+    options.set_enable_pipelined_write(
+        env_bool("COZO_ROCKSDB_ENABLE_PIPELINED_WRITE", false)
+    );
+    options.set_unordered_write(env_bool("COZO_ROCKSDB_UNORDERED_WRITE", false));
+
+    // === Statistics & Logging ===
+    if env_bool("COZO_ROCKSDB_ENABLE_STATISTICS", false) {
+        options.enable_statistics();
+    }
+    if let Some(period) = env_var_opt::<u32>("COZO_ROCKSDB_STATS_DUMP_PERIOD_SEC") {
+        options.set_stats_dump_period_sec(period);
+    }
+    if let Some(size) = env_var_opt::<usize>("COZO_ROCKSDB_MAX_LOG_FILE_SIZE") {
+        options.set_max_log_file_size(size);
+    }
+    if let Some(num) = env_var_opt::<usize>("COZO_ROCKSDB_KEEP_LOG_FILE_NUM") {
+        options.set_keep_log_file_num(num);
+    }
+
+    options
+}
+
+// =============================================================================
+// Database Creation
+// =============================================================================
+
+/// Creates a RocksDB database object using the official rust-rocksdb crate.
+///
+/// This backend supports comprehensive configuration via environment variables.
+/// See module documentation for the full list of supported options.
+///
+/// Supports concurrent readers and writers with optimistic transactions.
 pub fn new_cozo_newrocksdb(path: impl AsRef<Path>) -> Result<Db<NewRocksDbStorage>> {
     fs::create_dir_all(&path).map_err(|err| {
         BadDbInit(format!(
@@ -63,9 +474,13 @@ pub fn new_cozo_newrocksdb(path: impl AsRef<Path>) -> Result<Db<NewRocksDbStorag
     let store_path = path_buf.join("data");
     let store_path_str = store_path.to_str().ok_or(miette!("bad path name"))?;
 
-    let mut options = Options::default();
-    options.create_if_missing(is_new);
-    // Add any necessary RocksDB options here
+    // Build options from environment variables
+    let options = build_options(is_new);
+
+    info!(
+        "Opening NewRocksDB at {} (is_new: {})",
+        store_path_str, is_new
+    );
 
     let db = OptimisticTransactionDB::open(&options, store_path_str)
         .into_diagnostic()
@@ -76,7 +491,11 @@ pub fn new_cozo_newrocksdb(path: impl AsRef<Path>) -> Result<Db<NewRocksDbStorag
     Ok(ret)
 }
 
-/// RocksDB storage engine
+// =============================================================================
+// Storage Implementation
+// =============================================================================
+
+/// RocksDB storage engine using the official rust-rocksdb crate
 #[derive(Clone)]
 pub struct NewRocksDbStorage {
     db: Arc<OptimisticTransactionDB>,
@@ -86,13 +505,35 @@ impl NewRocksDbStorage {
     pub(crate) fn new(db: OptimisticTransactionDB) -> Self {
         Self { db: Arc::new(db) }
     }
+
+    /// Flush all memtables to disk
+    pub fn flush(&self) -> Result<()> {
+        self.db
+            .flush()
+            .into_diagnostic()
+            .wrap_err("Failed to flush RocksDB")
+    }
+
+    /// Get RocksDB statistics (if enabled via COZO_ROCKSDB_ENABLE_STATISTICS)
+    pub fn get_statistics(&self) -> Option<String> {
+        self.db.property_value("rocksdb.stats").ok().flatten()
+    }
+
+    /// Get memory usage estimate
+    pub fn get_memory_usage(&self) -> Result<u64> {
+        self.db
+            .property_int_value("rocksdb.estimate-table-readers-mem")
+            .into_diagnostic()
+            .wrap_err("Failed to get memory usage")?
+            .ok_or_else(|| miette!("Memory property not available"))
+    }
 }
 
 impl<'s> Storage<'s> for NewRocksDbStorage {
     type Tx = NewRocksDbTx<'s>;
 
     fn storage_kind(&self) -> &'static str {
-        "rocksdb"
+        "newrocksdb"
     }
 
     fn transact(&'s self, _write: bool) -> Result<Self::Tx> {
@@ -121,6 +562,10 @@ impl<'s> Storage<'s> for NewRocksDbStorage {
             .wrap_err_with(|| "Batch put failed")
     }
 }
+
+// =============================================================================
+// Transaction Implementation
+// =============================================================================
 
 pub struct NewRocksDbTx<'a> {
     db_tx: Option<rocksdb::Transaction<'a, OptimisticTransactionDB>>,
@@ -343,6 +788,10 @@ impl<'s> StoreTx<'s> for NewRocksDbTx<'s> {
     }
 }
 
+// =============================================================================
+// Iterators
+// =============================================================================
+
 pub(crate) struct NewRocksDbIterator<'a> {
     inner: rocksdb::DBIteratorWithThreadMode<'a, rocksdb::Transaction<'a, OptimisticTransactionDB>>,
     upper_bound: Vec<u8>,
@@ -426,6 +875,10 @@ impl<'a> Iterator for NewRocksDbIteratorRaw<'a> {
     }
 }
 
+// =============================================================================
+// Tests
+// =============================================================================
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -438,7 +891,6 @@ mod tests {
         let temp_dir = TempDir::new().into_diagnostic()?;
         let db = new_cozo_newrocksdb(temp_dir.path())?;
 
-        // Create test tables with proper ScriptMutability parameter
         db.run_script(
             r#"
             {:create plain {k: Int => v}}
@@ -455,7 +907,6 @@ mod tests {
     fn test_basic_operations() -> Result<()> {
         let (_temp_dir, db) = setup_test_db()?;
 
-        // Test data insertion
         let mut to_import = BTreeMap::new();
         to_import.insert(
             "plain".to_string(),
@@ -469,7 +920,6 @@ mod tests {
         );
         db.import_relations(to_import)?;
 
-        // Test simple query with ScriptMutability parameter
         let result = db.run_script(
             "?[v] := *plain{k: 5, v}",
             Default::default(),
@@ -481,11 +931,11 @@ mod tests {
 
         Ok(())
     }
+
     #[test]
     fn test_time_travel() -> Result<()> {
         let (_temp_dir, db) = setup_test_db()?;
 
-        // Insert time travel data
         let mut to_import = BTreeMap::new();
         to_import.insert(
             "tt_test".to_string(),
@@ -508,7 +958,6 @@ mod tests {
         );
         db.import_relations(to_import)?;
 
-        // Query at different timestamps
         let result = db.run_script(
             "?[v] := *tt_test{k: 1, v @ 0}",
             Default::default(),
@@ -530,7 +979,6 @@ mod tests {
     fn test_range_operations() -> Result<()> {
         let (_temp_dir, db) = setup_test_db()?;
 
-        // Insert test data
         let mut to_import = BTreeMap::new();
         to_import.insert(
             "plain".to_string(),
@@ -544,7 +992,6 @@ mod tests {
         );
         db.import_relations(to_import)?;
 
-        // Test range query
         let result = db.run_script(
             "?[k, v] := *plain{k, v}, k >= 3, k < 7",
             Default::default(),
