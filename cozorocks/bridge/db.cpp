@@ -14,30 +14,14 @@
 #include "rocksdb/rate_limiter.h"
 
 // ============================================================================
-// Default values used when neither an OPTIONS file nor an env var is provided.
-// These are baseline defaults only — they are NEVER applied unconditionally
-// over an OPTIONS file.
-//
-// Precedence (highest wins):
-//   1. Environment variables (COZO_ROCKSDB_*)
-//   2. OPTIONS file (placed at <db_path>/options)
-//   3. These defaults
+// Default block cache size (used when no OPTIONS file, no env var, and
+// opts.block_cache_size is 0).
 // ============================================================================
 
 static const size_t DEFAULT_BLOCK_CACHE_MB = 256;
-static const int DEFAULT_MAX_OPEN_FILES = 1000;
-static const size_t DEFAULT_WRITE_BUFFER_SIZE_MB = 16;
-static const int DEFAULT_MAX_WRITE_BUFFER_NUMBER = 3;
-static const size_t DEFAULT_DB_WRITE_BUFFER_SIZE_MB = 128;
-static const size_t DEFAULT_SOFT_PENDING_COMPACTION_GB = 64;
-static const size_t DEFAULT_HARD_PENDING_COMPACTION_GB = 256;
-static const int DEFAULT_LEVEL0_SLOWDOWN_WRITES_TRIGGER = 20;
-static const int DEFAULT_LEVEL0_STOP_WRITES_TRIGGER = 36;
-static const size_t DEFAULT_MAX_TOTAL_WAL_SIZE_MB = 1024;
-static const size_t DEFAULT_RATE_LIMIT_MB_PER_SEC = 0;
 
 // ============================================================================
-// Compression type parser
+// Compression type parser (for env var overrides)
 // ============================================================================
 
 static CompressionType parse_compression_type(const char* value) {
@@ -48,20 +32,13 @@ static CompressionType parse_compression_type(const char* value) {
     if (s == "lz4")    return kLZ4Compression;
     if (s == "lz4hc")  return kLZ4HCCompression;
     if (s == "zstd")   return kZSTD;
-    // Unknown value — keep current setting
     return kLZ4Compression;
 }
 
 // ============================================================================
-// Shared rate limiter (disabled — API changed between RocksDB versions)
-// ============================================================================
-
-static std::shared_ptr<RateLimiter> get_shared_rate_limiter() {
-    return nullptr;
-}
-
-// ============================================================================
-// Shared block cache — process-global, created once
+// Shared block cache — process-global, created once.
+// Required for clear_block_cache / set_block_cache_capacity /
+// get_block_cache_stats APIs.
 // ============================================================================
 
 static std::shared_ptr<Cache> shared_cache = nullptr;
@@ -114,45 +91,25 @@ std::unique_ptr<BlockCacheStats> get_shared_block_cache_stats() {
 
 // ============================================================================
 // Baseline defaults — used when no OPTIONS file is present.
-// Every value here can be overridden by an env var in open_db().
+// These match the original cozo defaults (before the memory-leak debugging
+// changes that added aggressive overrides).
 // ============================================================================
 
 Options default_db_options() {
     Options options = Options();
+    options.bottommost_compression = kZSTD;
     options.compression = kLZ4Compression;
-    options.bottommost_compression = kLZ4Compression;
     options.level_compaction_dynamic_level_bytes = true;
     options.max_background_jobs = 6;
     options.bytes_per_sync = 1048576;
     options.compaction_pri = kMinOverlappingRatio;
-    options.compaction_readahead_size = 2 * 1024 * 1024;  // 2MB
-
-    options.write_buffer_size = DEFAULT_WRITE_BUFFER_SIZE_MB * 1024 * 1024;
-    options.max_write_buffer_number = DEFAULT_MAX_WRITE_BUFFER_NUMBER;
-    options.db_write_buffer_size = DEFAULT_DB_WRITE_BUFFER_SIZE_MB * 1024 * 1024;
-
-    options.soft_pending_compaction_bytes_limit = DEFAULT_SOFT_PENDING_COMPACTION_GB * 1024ULL * 1024ULL * 1024ULL;
-    options.hard_pending_compaction_bytes_limit = DEFAULT_HARD_PENDING_COMPACTION_GB * 1024ULL * 1024ULL * 1024ULL;
-    options.level0_slowdown_writes_trigger = DEFAULT_LEVEL0_SLOWDOWN_WRITES_TRIGGER;
-    options.level0_stop_writes_trigger = DEFAULT_LEVEL0_STOP_WRITES_TRIGGER;
-
-    options.max_total_wal_size = DEFAULT_MAX_TOTAL_WAL_SIZE_MB * 1024 * 1024;
-    options.wal_bytes_per_sync = 1048576;  // 1MB
-
-    options.max_open_files = DEFAULT_MAX_OPEN_FILES;
-
-    auto rate_limiter = get_shared_rate_limiter();
-    if (rate_limiter) {
-        options.rate_limiter = rate_limiter;
-    }
 
     BlockBasedTableOptions table_options;
     table_options.block_cache = get_shared_block_cache();
-    table_options.block_size = 32 * 1024;  // 32KB
+    table_options.block_size = 16 * 1024;  // 16KB
     table_options.cache_index_and_filter_blocks = true;
     table_options.pin_l0_filter_and_index_blocks_in_cache = true;
     table_options.format_version = 6;
-    table_options.optimize_filters_for_memory = true;
 
     auto table_factory = NewBlockBasedTableFactory(table_options);
     options.table_factory.reset(table_factory);
@@ -163,17 +120,31 @@ Options default_db_options() {
 // ============================================================================
 // open_db — opens a RocksDB TransactionDB
 //
-// Precedence (highest wins):
+// Configuration precedence (highest wins):
 //   1. Environment variables (COZO_ROCKSDB_*)
 //   2. OPTIONS file (placed at <db_path>/options)
 //   3. default_db_options() baseline
+//
+// The OPTIONS file is fully respected — no values are unconditionally
+// overridden after loading. Env vars only apply when explicitly set.
 // ============================================================================
 
 shared_ptr <RocksDbBridge> open_db(const DbOpts &opts, RocksDbStatus &status) {
     // --- Step 1: Baseline defaults ----------------------------------------
     auto options = default_db_options();
 
-    // --- Step 2: Load OPTIONS file if present (overrides defaults) --------
+    // --- Step 2: Block cache sizing ---------------------------------------
+    // Resize the shared cache if opts.block_cache_size is set (from Rust/Erlang).
+    // This happens before OPTIONS file loading so the OPTIONS file can further
+    // override it (unless env var takes precedence — handled in get_shared_block_cache).
+    if (opts.block_cache_size > 0) {
+        const char* env_cache = std::getenv("COZO_ROCKSDB_BLOCK_CACHE_MB");
+        if (env_cache == nullptr) {
+            set_shared_block_cache_capacity(opts.block_cache_size / (1024 * 1024));
+        }
+    }
+
+    // --- Step 3: Load OPTIONS file if present (overrides defaults) --------
     if (!opts.options_path.empty()) {
         DBOptions loaded_db_opt;
         std::vector<ColumnFamilyDescriptor> loaded_cf_descs;
@@ -186,12 +157,12 @@ shared_ptr <RocksDbBridge> open_db(const DbOpts &opts, RocksDbStatus &status) {
             return nullptr;
         }
 
-        // If the OPTIONS file specifies a block cache capacity and no env var
-        // override is set, resize the shared cache to match the OPTIONS file.
-        // Then replace all loaded CF caches with the shared process-global cache
-        // (needed for clear_block_cache/set_block_cache_capacity/get_block_cache_stats).
+        // If the OPTIONS file created a block cache with a specific capacity
+        // and neither env var nor opts.block_cache_size overrides it, resize
+        // the shared cache to match.
         const char* env_cache_check = std::getenv("COZO_ROCKSDB_BLOCK_CACHE_MB");
-        if (env_cache_check == nullptr && !loaded_cf_descs.empty()) {
+        if (env_cache_check == nullptr && opts.block_cache_size == 0
+                && !loaded_cf_descs.empty()) {
             auto* first_bbt =
                     loaded_cf_descs[0].options.table_factory->GetOptions<BlockBasedTableOptions>();
             if (first_bbt != nullptr && first_bbt->block_cache != nullptr) {
@@ -201,6 +172,9 @@ shared_ptr <RocksDbBridge> open_db(const DbOpts &opts, RocksDbStatus &status) {
                 }
             }
         }
+
+        // Replace all loaded CF block caches with the shared process-global
+        // cache (so clear_block_cache/set_block_cache_capacity/get_block_cache_stats work).
         for (size_t i = 0; i < loaded_cf_descs.size(); ++i) {
             auto* loaded_bbt_opt =
                     loaded_cf_descs[i].options.table_factory->GetOptions<BlockBasedTableOptions>();
@@ -212,7 +186,7 @@ shared_ptr <RocksDbBridge> open_db(const DbOpts &opts, RocksDbStatus &status) {
         options = Options(loaded_db_opt, loaded_cf_descs[0].options);
     }
 
-    // --- Step 3: Functional settings from Rust builder --------------------
+    // --- Step 4: Functional settings from Rust builder --------------------
     if (opts.prepare_for_bulk_load) {
         options.PrepareForBulkLoad();
     }
@@ -225,12 +199,9 @@ shared_ptr <RocksDbBridge> open_db(const DbOpts &opts, RocksDbStatus &status) {
     options.create_if_missing = opts.create_if_missing;
     options.paranoid_checks = opts.paranoid_checks;
 
-    // --- Step 4: Environment variable overrides ---------------------------
-    // These have the HIGHEST precedence. They override both the OPTIONS file
-    // and the baseline defaults. Each override is conditional — it only
-    // applies when the env var is explicitly set.
-
-    // -- 4a. File and thread limits --
+    // --- Step 5: Environment variable overrides ---------------------------
+    // These have the HIGHEST precedence. Each override is conditional — it
+    // only applies when the env var is explicitly set.
 
     const char* env_max_open_files = std::getenv("COZO_ROCKSDB_MAX_OPEN_FILES");
     if (env_max_open_files != nullptr) {
@@ -244,8 +215,6 @@ shared_ptr <RocksDbBridge> open_db(const DbOpts &opts, RocksDbStatus &status) {
             options.max_background_jobs = val;
         }
     }
-
-    // -- 4b. Write buffer (memtable) settings --
 
     const char* env_write_buffer_size = std::getenv("COZO_ROCKSDB_WRITE_BUFFER_SIZE_MB");
     if (env_write_buffer_size != nullptr) {
@@ -266,11 +235,8 @@ shared_ptr <RocksDbBridge> open_db(const DbOpts &opts, RocksDbStatus &status) {
     const char* env_db_write_buffer_size = std::getenv("COZO_ROCKSDB_DB_WRITE_BUFFER_SIZE_MB");
     if (env_db_write_buffer_size != nullptr) {
         size_t size_mb = std::strtoul(env_db_write_buffer_size, nullptr, 10);
-        // 0 means unlimited, which is a valid value
         options.db_write_buffer_size = size_mb * 1024 * 1024;
     }
-
-    // -- 4c. Compaction backpressure --
 
     const char* env_soft_pending = std::getenv("COZO_ROCKSDB_SOFT_PENDING_COMPACTION_GB");
     if (env_soft_pending != nullptr) {
@@ -287,8 +253,6 @@ shared_ptr <RocksDbBridge> open_db(const DbOpts &opts, RocksDbStatus &status) {
             options.hard_pending_compaction_bytes_limit = size_gb * 1024ULL * 1024ULL * 1024ULL;
         }
     }
-
-    // -- 4d. L0 compaction triggers --
 
     const char* env_l0_compaction_trigger = std::getenv("COZO_ROCKSDB_LEVEL0_FILE_NUM_COMPACTION_TRIGGER");
     if (env_l0_compaction_trigger != nullptr) {
@@ -314,8 +278,6 @@ shared_ptr <RocksDbBridge> open_db(const DbOpts &opts, RocksDbStatus &status) {
         }
     }
 
-    // -- 4e. Level sizing --
-
     const char* env_target_file_size_base = std::getenv("COZO_ROCKSDB_TARGET_FILE_SIZE_BASE_MB");
     if (env_target_file_size_base != nullptr) {
         size_t size_mb = std::strtoul(env_target_file_size_base, nullptr, 10);
@@ -332,8 +294,6 @@ shared_ptr <RocksDbBridge> open_db(const DbOpts &opts, RocksDbStatus &status) {
         }
     }
 
-    // -- 4f. Compression --
-
     const char* env_compression = std::getenv("COZO_ROCKSDB_COMPRESSION_TYPE");
     if (env_compression != nullptr) {
         options.compression = parse_compression_type(env_compression);
@@ -344,8 +304,6 @@ shared_ptr <RocksDbBridge> open_db(const DbOpts &opts, RocksDbStatus &status) {
         options.bottommost_compression = parse_compression_type(env_bottommost_compression);
     }
 
-    // -- 4g. WAL --
-
     const char* env_max_wal_size = std::getenv("COZO_ROCKSDB_MAX_TOTAL_WAL_SIZE_MB");
     if (env_max_wal_size != nullptr) {
         size_t size_mb = std::strtoul(env_max_wal_size, nullptr, 10);
@@ -353,8 +311,6 @@ shared_ptr <RocksDbBridge> open_db(const DbOpts &opts, RocksDbStatus &status) {
             options.max_total_wal_size = size_mb * 1024 * 1024;
         }
     }
-
-    // -- 4h. I/O tuning --
 
     const char* env_bytes_per_sync = std::getenv("COZO_ROCKSDB_BYTES_PER_SYNC");
     if (env_bytes_per_sync != nullptr) {
@@ -374,7 +330,7 @@ shared_ptr <RocksDbBridge> open_db(const DbOpts &opts, RocksDbStatus &status) {
         options.compaction_readahead_size = val;
     }
 
-    // --- Step 5: Blob files (from Rust builder) ---------------------------
+    // --- Step 6: Blob files (from Rust builder) ---------------------------
     if (opts.enable_blob_files) {
         options.enable_blob_files = true;
         options.min_blob_size = opts.min_blob_size;
@@ -382,26 +338,23 @@ shared_ptr <RocksDbBridge> open_db(const DbOpts &opts, RocksDbStatus &status) {
         options.enable_blob_garbage_collection = opts.enable_blob_garbage_collection;
     }
 
-    // --- Step 6: Bloom filter ---------------------------------------------
+    // --- Step 7: Bloom filter ---------------------------------------------
     // IMPORTANT: Preserve existing BlockBasedTableOptions (from OPTIONS file
     // or defaults). Only set the filter policy — do NOT rebuild from scratch.
+    // This fixes a bug that was present even in the original code.
     if (opts.use_bloom_filter) {
         auto* existing_bbt = options.table_factory->GetOptions<BlockBasedTableOptions>();
         BlockBasedTableOptions table_options;
         if (existing_bbt != nullptr) {
-            // Copy all existing settings (block_size, partition_filters,
-            // metadata_block_size, cache_index_and_filter_blocks, etc.)
             table_options = *existing_bbt;
         }
-        // Ensure shared block cache
         table_options.block_cache = get_shared_block_cache();
-        // Set bloom filter policy
         table_options.filter_policy.reset(NewBloomFilterPolicy(opts.bloom_filter_bits_per_key, false));
         table_options.whole_key_filtering = opts.bloom_filter_whole_key_filtering;
         options.table_factory.reset(NewBlockBasedTableFactory(table_options));
     }
 
-    // --- Step 7: Prefix extractors (from Rust builder) --------------------
+    // --- Step 8: Prefix extractors (from Rust builder) --------------------
     if (opts.use_capped_prefix_extractor) {
         options.prefix_extractor.reset(NewCappedPrefixTransform(opts.capped_prefix_extractor_len));
     }
@@ -409,9 +362,8 @@ shared_ptr <RocksDbBridge> open_db(const DbOpts &opts, RocksDbStatus &status) {
         options.prefix_extractor.reset(NewFixedPrefixTransform(opts.fixed_prefix_extractor_len));
     }
 
-    // --- Step 8: Table-level env var overrides ----------------------------
-    // These come AFTER the bloom filter so they take final precedence over
-    // everything (defaults, OPTIONS file, and bloom filter setup).
+    // --- Step 9: Table-level env var overrides ----------------------------
+    // These come AFTER the bloom filter so they take final precedence.
     const char* env_block_size = std::getenv("COZO_ROCKSDB_BLOCK_SIZE");
     if (env_block_size != nullptr) {
         size_t block_size = std::strtoul(env_block_size, nullptr, 10);
@@ -425,7 +377,7 @@ shared_ptr <RocksDbBridge> open_db(const DbOpts &opts, RocksDbStatus &status) {
         }
     }
 
-    // --- Step 9: Open the database ----------------------------------------
+    // --- Step 10: Open the database ---------------------------------------
     options.create_missing_column_families = true;
 
     shared_ptr <RocksDbBridge> db = make_shared<RocksDbBridge>();
