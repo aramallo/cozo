@@ -186,7 +186,21 @@ shared_ptr <RocksDbBridge> open_db(const DbOpts &opts, RocksDbStatus &status) {
             return nullptr;
         }
 
-        // Ensure loaded column families use the shared block cache
+        // If the OPTIONS file specifies a block cache capacity and no env var
+        // override is set, resize the shared cache to match the OPTIONS file.
+        // Then replace all loaded CF caches with the shared process-global cache
+        // (needed for clear_block_cache/set_block_cache_capacity/get_block_cache_stats).
+        const char* env_cache_check = std::getenv("COZO_ROCKSDB_BLOCK_CACHE_MB");
+        if (env_cache_check == nullptr && !loaded_cf_descs.empty()) {
+            auto* first_bbt =
+                    loaded_cf_descs[0].options.table_factory->GetOptions<BlockBasedTableOptions>();
+            if (first_bbt != nullptr && first_bbt->block_cache != nullptr) {
+                size_t loaded_capacity = first_bbt->block_cache->GetCapacity();
+                if (loaded_capacity > 0) {
+                    set_shared_block_cache_capacity(loaded_capacity / (1024 * 1024));
+                }
+            }
+        }
         for (size_t i = 0; i < loaded_cf_descs.size(); ++i) {
             auto* loaded_bbt_opt =
                     loaded_cf_descs[i].options.table_factory->GetOptions<BlockBasedTableOptions>();
