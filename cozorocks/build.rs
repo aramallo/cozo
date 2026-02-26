@@ -10,6 +10,64 @@ use std::env::var;
 use std::path::{Path, PathBuf};
 use std::{env, fs, process::Command};
 
+/// Patch RocksDB's io_posix.cc to replace getline()+free() with fgets() using
+/// a stack buffer. This prevents a cross-allocator SIGSEGV when jemalloc
+/// provides unprefixed malloc/free inside a shared library (cdylib) linked with
+/// Rust's -Bsymbolic-non-weak-functions: getline() allocates via glibc's
+/// malloc (inside libc.so), but free() resolves to jemalloc's free (locally
+/// bound), causing a crash in _rjem_je_free_default.
+///
+/// Returns the path to the patched file in OUT_DIR if the patch was applied,
+/// or None if the original file doesn't contain the vulnerable pattern.
+fn patch_io_posix(out_dir: &Path) -> Option<PathBuf> {
+    let src = Path::new("rocksdb/env/io_posix.cc");
+    let content = fs::read_to_string(src).expect("Failed to read rocksdb/env/io_posix.cc");
+
+    // Only patch if the vulnerable getline() pattern is present
+    if !content.contains("getline(&line, &len, fp)") {
+        return None;
+    }
+
+    let patched = content.replace(
+        "  // Get value in the queue sysfs file\n\
+         \x20 FILE* fp;\n\
+         \x20 size_t value = 0;\n\
+         \x20 fp = fopen(fname.c_str(), \"r\");\n\
+         \x20 if (fp != nullptr) {\n\
+         \x20   char* line = nullptr;\n\
+         \x20   size_t len = 0;\n\
+         \x20   if (getline(&line, &len, fp) != -1) {\n\
+         \x20     sscanf(line, \"%zu\", &value);\n\
+         \x20   }\n\
+         \x20   free(line);\n\
+         \x20   fclose(fp);\n\
+         \x20 }",
+        "  // Get value in the queue sysfs file.\n\
+         \x20 // Uses fgets() with a stack buffer instead of getline() to avoid a\n\
+         \x20 // cross-allocator crash when jemalloc provides unprefixed malloc/free\n\
+         \x20 // inside a shared library linked with -Bsymbolic-non-weak-functions:\n\
+         \x20 // getline() allocates via glibc's malloc (inside libc.so), but free()\n\
+         \x20 // resolves to jemalloc's free (locally bound), causing SIGSEGV.\n\
+         \x20 // sysfs queue values are small integers (e.g., \"512\\n\"), so 64 bytes\n\
+         \x20 // is more than sufficient.\n\
+         \x20 FILE* fp;\n\
+         \x20 size_t value = 0;\n\
+         \x20 fp = fopen(fname.c_str(), \"r\");\n\
+         \x20 if (fp != nullptr) {\n\
+         \x20   char line[64];\n\
+         \x20   if (fgets(line, sizeof(line), fp) != nullptr) {\n\
+         \x20     sscanf(line, \"%zu\", &value);\n\
+         \x20   }\n\
+         \x20   fclose(fp);\n\
+         \x20 }",
+    );
+
+    let dest = out_dir.join("patched_io_posix.cc");
+    fs::write(&dest, patched).expect("Failed to write patched io_posix.cc");
+    println!("cargo:warning=Patched rocksdb/env/io_posix.cc: getline→fgets (cross-allocator fix)");
+    Some(dest)
+}
+
 fn main() {
     let target = env::var("TARGET").unwrap();
 
@@ -330,7 +388,19 @@ fn build_rocksdb() {
         config.flag("-Wno-invalid-offsetof");
     }
 
+    // Patch io_posix.cc to fix cross-allocator SIGSEGV (getline→fgets).
+    // If the patch applies, compile the patched copy from OUT_DIR instead of
+    // the submodule original. See patch_io_posix() for details.
+    let out_dir = PathBuf::from(env::var_os("OUT_DIR").unwrap());
+    let patched_io_posix = patch_io_posix(&out_dir);
+
     for file in lib_sources {
+        if file == "env/io_posix.cc" {
+            if let Some(ref patched) = patched_io_posix {
+                config.file(patched);
+                continue;
+            }
+        }
         config.file(&format!("rocksdb/{file}"));
     }
 
