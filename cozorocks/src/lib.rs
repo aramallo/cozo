@@ -23,6 +23,7 @@ pub use bridge::ffi::StatusSeverity;
 pub use bridge::ffi::StatusSubCode;
 pub use bridge::iter::DbIter;
 pub use bridge::iter::IterBuilder;
+pub use bridge::snapshot_tx::SnapshotTx;
 pub use bridge::tx::PinSlice;
 pub use bridge::tx::Tx;
 pub use bridge::tx::TxBuilder;

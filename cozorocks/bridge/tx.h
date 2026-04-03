@@ -134,4 +134,65 @@ struct TxBridge {
     }
 };
 
+struct SnapshotTxBridge {
+    DB *db;
+    const Snapshot *snapshot;
+    unique_ptr<ReadOptions> r_opts;
+    ColumnFamilyHandle *cf_handle;
+
+    explicit SnapshotTxBridge(TransactionDB *tdb_, ColumnFamilyHandle *cf_handle_)
+        : db(tdb_),
+          snapshot(tdb_->GetSnapshot()),
+          r_opts(new ReadOptions),
+          cf_handle(cf_handle_) {
+        r_opts->snapshot = snapshot;
+        r_opts->ignore_range_deletions = true;
+    }
+
+    ~SnapshotTxBridge() {
+        if (snapshot != nullptr && db != nullptr) {
+            db->ReleaseSnapshot(snapshot);
+            snapshot = nullptr;
+        }
+    }
+
+    SnapshotTxBridge(const SnapshotTxBridge &) = delete;
+    SnapshotTxBridge &operator=(const SnapshotTxBridge &) = delete;
+
+    inline void verify_checksums(bool val) {
+        r_opts->verify_checksums = val;
+    }
+
+    inline void fill_cache(bool val) {
+        r_opts->fill_cache = val;
+    }
+
+    inline unique_ptr<IterBridge> iterator() const {
+        auto it = make_unique<IterBridge>(db);
+        it->set_snapshot(snapshot);
+        return it;
+    }
+
+    inline unique_ptr<PinnableSlice> get(RustBytes key, RocksDbStatus &status) const {
+        Slice key_ = convert_slice(key);
+        auto ret = make_unique<PinnableSlice>();
+        auto s = db->Get(*r_opts, cf_handle, key_, &*ret);
+        write_status(s, status);
+        return ret;
+    }
+
+    inline void exists(RustBytes key, RocksDbStatus &status) const {
+        Slice key_ = convert_slice(key);
+        auto ret = PinnableSlice();
+        auto s = db->Get(*r_opts, cf_handle, key_, &ret);
+        write_status(s, status);
+    }
+
+    inline void commit(RocksDbStatus &status) const {
+        // No-op for read-only snapshot — nothing to write.
+        // Snapshot is released by the destructor.
+        write_status(Status::OK(), status);
+    }
+};
+
 #endif //COZOROCKS_TX_H

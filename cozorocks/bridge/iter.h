@@ -28,6 +28,13 @@ struct IterBridge {
         r_opts->auto_prefix_mode = true;
     }
 
+    explicit IterBridge(DB *db_) : db(db_), tx(nullptr), iter(nullptr), lower_bound(),
+                                                                 upper_bound(),
+                                                                 r_opts(new ReadOptions) {
+        r_opts->ignore_range_deletions = true;
+        r_opts->auto_prefix_mode = true;
+    }
+
     inline void set_snapshot(const Snapshot *snapshot) {
         r_opts->snapshot = snapshot;
     }

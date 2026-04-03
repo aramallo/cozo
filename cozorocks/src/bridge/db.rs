@@ -10,6 +10,7 @@ use cxx::*;
 use std::path::Path;
 
 use crate::bridge::ffi::*;
+use crate::bridge::snapshot_tx::SnapshotTx;
 use crate::bridge::tx::TxBuilder;
 
 #[derive(Default, Clone)]
@@ -145,6 +146,11 @@ impl RocksDb {
     pub fn transact(&self) -> TxBuilder {
         TxBuilder {
             inner: self.inner.transact(),
+        }
+    }
+    pub fn snapshot_tx(&self) -> SnapshotTx {
+        SnapshotTx {
+            inner: self.inner.snapshot_tx(),
         }
     }
     #[inline]

@@ -15,6 +15,7 @@ use crate::StatusSeverity;
 
 pub(crate) mod db;
 pub(crate) mod iter;
+pub(crate) mod snapshot_tx;
 pub(crate) mod tx;
 
 #[cxx::bridge]
@@ -128,6 +129,7 @@ pub(crate) mod ffi {
         fn get_db_path(self: &RocksDbBridge) -> &CxxString;
         fn open_db(builder: &DbOpts, status: &mut RocksDbStatus) -> SharedPtr<RocksDbBridge>;
         fn transact(self: &RocksDbBridge) -> UniquePtr<TxBridge>;
+        fn snapshot_tx(self: &RocksDbBridge) -> UniquePtr<SnapshotTxBridge>;
         fn del_range(self: &RocksDbBridge, lower: &[u8], upper: &[u8], status: &mut RocksDbStatus);
         fn put(self: &RocksDbBridge, key: &[u8], val: &[u8], status: &mut RocksDbStatus);
         fn compact_range(
@@ -179,6 +181,18 @@ pub(crate) mod ffi {
         fn pop_savepoint(self: Pin<&mut TxBridge>, status: &mut RocksDbStatus);
         fn set_savepoint(self: Pin<&mut TxBridge>);
         fn iterator(self: &TxBridge) -> UniquePtr<IterBridge>;
+
+        type SnapshotTxBridge;
+        fn verify_checksums(self: Pin<&mut SnapshotTxBridge>, val: bool);
+        fn fill_cache(self: Pin<&mut SnapshotTxBridge>, val: bool);
+        fn get(
+            self: &SnapshotTxBridge,
+            key: &[u8],
+            status: &mut RocksDbStatus,
+        ) -> UniquePtr<PinnableSlice>;
+        fn exists(self: &SnapshotTxBridge, key: &[u8], status: &mut RocksDbStatus);
+        fn commit(self: &SnapshotTxBridge, status: &mut RocksDbStatus);
+        fn iterator(self: &SnapshotTxBridge) -> UniquePtr<IterBridge>;
 
         type IterBridge;
         fn start(self: Pin<&mut IterBridge>);

@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use log::info;
 use miette::{miette, IntoDiagnostic, Result, WrapErr};
 
-use cozorocks::{DbBuilder, DbIter, RocksDb, RocksDbMemoryStats, Tx};
+use cozorocks::{DbBuilder, DbIter, IterBuilder, RocksDb, RocksDbMemoryStats, SnapshotTx, Tx};
 // Re-export block cache control functions (process-global)
 pub use cozorocks::{BlockCacheStatsResult, clear_block_cache, set_block_cache_capacity_mb, get_block_cache_stats};
 
@@ -141,9 +141,13 @@ impl Storage<'_> for RocksDbStorage {
         "rocksdb"
     }
 
-    fn transact(&self, _write: bool) -> Result<Self::Tx> {
-        let db_tx = self.db.transact().set_snapshot(true).start();
-        Ok(RocksDbTx { db_tx })
+    fn transact(&self, write: bool) -> Result<Self::Tx> {
+        if write {
+            let db_tx = self.db.transact().set_snapshot(true).start();
+            Ok(RocksDbTx::ReadWrite(db_tx))
+        } else {
+            Ok(RocksDbTx::ReadOnly(self.db.snapshot_tx()))
+        }
     }
 
     fn range_compact(&self, lower: &[u8], upper: &[u8]) -> Result<()> {
@@ -162,62 +166,106 @@ impl Storage<'_> for RocksDbStorage {
     }
 }
 
-pub struct RocksDbTx {
-    db_tx: Tx,
+pub enum RocksDbTx {
+    ReadWrite(Tx),
+    ReadOnly(SnapshotTx),
 }
 
+// SAFETY: ReadOnly variant is genuinely Sync — DB::Get() and DB::NewIterator()
+// with a snapshot are documented as thread-safe in RocksDB. Each rayon thread
+// creates its own independent iterator via iterator().
+// ReadWrite variant is only used from transact_write() which feeds sequential
+// execution paths (never accessed concurrently via par_iter).
 unsafe impl Sync for RocksDbTx {}
+
+impl RocksDbTx {
+    #[inline]
+    fn make_iterator(&self) -> IterBuilder {
+        match self {
+            RocksDbTx::ReadWrite(tx) => tx.iterator(),
+            RocksDbTx::ReadOnly(snap) => snap.iterator(),
+        }
+    }
+}
 
 impl<'s> StoreTx<'s> for RocksDbTx {
     #[inline]
     fn get(&self, key: &[u8], for_update: bool) -> Result<Option<Vec<u8>>> {
-        Ok(self.db_tx.get(key, for_update)?.map(|v| v.to_vec()))
+        match self {
+            RocksDbTx::ReadWrite(tx) => Ok(tx.get(key, for_update)?.map(|v| v.to_vec())),
+            RocksDbTx::ReadOnly(snap) => Ok(snap.get(key)?.map(|v| v.to_vec())),
+        }
     }
 
     #[inline]
     fn put(&mut self, key: &[u8], val: &[u8]) -> Result<()> {
-        Ok(self.db_tx.put(key, val)?)
+        match self {
+            RocksDbTx::ReadWrite(tx) => Ok(tx.put(key, val)?),
+            RocksDbTx::ReadOnly(_) => panic!("Cannot put on a read-only snapshot transaction"),
+        }
     }
 
     fn supports_par_put(&self) -> bool {
-        true
+        matches!(self, RocksDbTx::ReadWrite(_))
     }
 
     #[inline]
     fn par_put(&self, key: &[u8], val: &[u8]) -> Result<()> {
-        Ok(self.db_tx.put(key, val)?)
+        match self {
+            RocksDbTx::ReadWrite(tx) => Ok(tx.put(key, val)?),
+            RocksDbTx::ReadOnly(_) => panic!("Cannot par_put on a read-only snapshot transaction"),
+        }
     }
 
     #[inline]
     fn del(&mut self, key: &[u8]) -> Result<()> {
-        Ok(self.db_tx.del(key)?)
+        match self {
+            RocksDbTx::ReadWrite(tx) => Ok(tx.del(key)?),
+            RocksDbTx::ReadOnly(_) => panic!("Cannot del on a read-only snapshot transaction"),
+        }
     }
 
     #[inline]
     fn par_del(&self, key: &[u8]) -> Result<()> {
-        Ok(self.db_tx.del(key)?)
+        match self {
+            RocksDbTx::ReadWrite(tx) => Ok(tx.del(key)?),
+            RocksDbTx::ReadOnly(_) => panic!("Cannot par_del on a read-only snapshot transaction"),
+        }
     }
 
     fn del_range_from_persisted(&mut self, lower: &[u8], upper: &[u8]) -> Result<()> {
-        let mut inner = self.db_tx.iterator().upper_bound(upper).start();
-        inner.seek(lower);
-        while let Some(key) = inner.key()? {
-            if key >= upper {
-                break;
+        match self {
+            RocksDbTx::ReadWrite(tx) => {
+                let mut inner = tx.iterator().upper_bound(upper).start();
+                inner.seek(lower);
+                while let Some(key) = inner.key()? {
+                    if key >= upper {
+                        break;
+                    }
+                    tx.del(key)?;
+                    inner.next();
+                }
+                Ok(())
             }
-            self.db_tx.del(key)?;
-            inner.next();
+            RocksDbTx::ReadOnly(_) => {
+                panic!("Cannot del_range on a read-only snapshot transaction")
+            }
         }
-        Ok(())
     }
 
     #[inline]
     fn exists(&self, key: &[u8], for_update: bool) -> Result<bool> {
-        Ok(self.db_tx.exists(key, for_update)?)
+        match self {
+            RocksDbTx::ReadWrite(tx) => Ok(tx.exists(key, for_update)?),
+            RocksDbTx::ReadOnly(snap) => Ok(snap.exists(key)?),
+        }
     }
 
     fn commit(&mut self) -> Result<()> {
-        Ok(self.db_tx.commit()?)
+        match self {
+            RocksDbTx::ReadWrite(tx) => Ok(tx.commit()?),
+            RocksDbTx::ReadOnly(snap) => Ok(snap.commit()?),
+        }
     }
 
     fn range_scan_tuple<'a>(
@@ -228,7 +276,7 @@ impl<'s> StoreTx<'s> for RocksDbTx {
     where
         's: 'a,
     {
-        let mut inner = self.db_tx.iterator().upper_bound(upper).start();
+        let mut inner = self.make_iterator().upper_bound(upper).start();
         inner.seek(lower);
         Box::new(RocksDbIterator {
             inner,
@@ -243,7 +291,7 @@ impl<'s> StoreTx<'s> for RocksDbTx {
         upper: &[u8],
         valid_at: ValidityTs,
     ) -> Box<dyn Iterator<Item = Result<Tuple>> + 'a> {
-        let inner = self.db_tx.iterator().upper_bound(upper).start();
+        let inner = self.make_iterator().upper_bound(upper).start();
         Box::new(RocksDbSkipIterator {
             inner,
             upper_bound: upper.to_vec(),
@@ -260,7 +308,7 @@ impl<'s> StoreTx<'s> for RocksDbTx {
     where
         's: 'a,
     {
-        let mut inner = self.db_tx.iterator().upper_bound(upper).start();
+        let mut inner = self.make_iterator().upper_bound(upper).start();
         inner.seek(lower);
         Box::new(RocksDbIteratorRaw {
             inner,
@@ -273,7 +321,7 @@ impl<'s> StoreTx<'s> for RocksDbTx {
     where
         's: 'a,
     {
-        let mut inner = self.db_tx.iterator().upper_bound(upper).start();
+        let mut inner = self.make_iterator().upper_bound(upper).start();
         inner.seek(lower);
         let mut count = 0;
         while let Some(k) = inner.key()? {

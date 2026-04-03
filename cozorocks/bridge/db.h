@@ -79,6 +79,10 @@ struct RocksDbBridge {
         return ret;
     }
 
+    [[nodiscard]] inline unique_ptr<SnapshotTxBridge> snapshot_tx() const {
+        return make_unique<SnapshotTxBridge>(&*this->db, db->DefaultColumnFamily());
+    }
+
     inline void del_range(RustBytes start, RustBytes end, RocksDbStatus &status) const {
         WriteBatch batch;
         auto cf = db->DefaultColumnFamily();
