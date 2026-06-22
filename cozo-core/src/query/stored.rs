@@ -1120,6 +1120,7 @@ struct TransactAssertionFailure {
 enum DataExtractor {
     DefaultExtractor(Expr, NullableColType),
     IndexExtractor(usize, NullableColType),
+    CommitNowExtractor(NullableColType),
 }
 
 impl DataExtractor {
@@ -1131,8 +1132,22 @@ impl DataExtractor {
             DataExtractor::IndexExtractor(i, typ) => typ
                 .coerce(tuple[*i].clone(), cur_vld)
                 .wrap_err_with(|| format!("when processing tuple {tuple:?}"))?,
+            DataExtractor::CommitNowExtractor(typ) => typ
+                .coerce(DataValue::from(cur_vld.0 .0), cur_vld)
+                .wrap_err_with(|| format!("when processing tuple {tuple:?}"))?,
         })
     }
+}
+
+/// Returns true iff `expr` is exactly `commit_now()` with no arguments and no
+/// surrounding operations. Compound expressions like `commit_now() + 1` are not
+/// matched and fall through to the regular default-evaluation path (which
+/// errors loudly via op_commit_now).
+fn is_commit_now_default(expr: &Expr) -> bool {
+    matches!(
+        expr,
+        Expr::Apply { op, args, .. } if op.name == "OP_COMMIT_NOW" && args.is_empty()
+    )
 }
 
 fn make_extractors(
@@ -1158,6 +1173,13 @@ fn make_update_extractors(
     for col in stored.iter() {
         if input_keys.contains(&col.name) {
             extractors.push(Some(make_extractor(col, input, bindings, tuple_headers)?));
+        } else if matches!(&col.default_gen, Some(e) if is_commit_now_default(e)) {
+            // commit_now() columns must be re-stamped on every update, even
+            // when the user did not bind the column. This guarantees the
+            // archive watermark stays correct after partial updates: an updated
+            // row gets a fresh timestamp and so cannot be archived until the
+            // replicator has uploaded the new version.
+            extractors.push(Some(DataExtractor::CommitNowExtractor(col.typing.clone())));
         } else {
             extractors.push(None);
         }
@@ -1181,6 +1203,9 @@ fn make_extractor(
         }
     }
     if let Some(expr) = &stored.default_gen {
+        if is_commit_now_default(expr) {
+            return Ok(DataExtractor::CommitNowExtractor(stored.typing.clone()));
+        }
         Ok(DataExtractor::DefaultExtractor(
             expr.clone(),
             stored.typing.clone(),

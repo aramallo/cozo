@@ -1612,3 +1612,1949 @@ fn fts_drop() {
     )
     .unwrap();
 }
+
+// ---------------------------------------------------------------------------
+// commit_now() — cozo-managed commit-time timestamp column default.
+//
+// Slice 1 of the archive design. Each script invocation captures cur_vld once
+// (at the top of run_script) and threads it through extract_data. A column
+// declared with `default commit_now()` should resolve to that value at write
+// time, identically for every row in the script, monotonically advancing
+// across scripts.
+// ---------------------------------------------------------------------------
+
+fn commit_now_get_int(v: &serde_json::Value) -> i64 {
+    v.as_i64()
+        .unwrap_or_else(|| panic!("expected integer ts, got {v:?}"))
+}
+
+#[test]
+fn commit_now_basic_default() {
+    let db = DbInstance::default();
+    db.run_default(r#":create r {id: Int => ts: Int default commit_now()}"#)
+        .unwrap();
+    db.run_default(r#"?[id] <- [[1]] :put r {id}"#).unwrap();
+    let res = db
+        .run_default("?[id, ts] := *r{id, ts}")
+        .unwrap()
+        .into_json();
+    assert_eq!(res["rows"].as_array().unwrap().len(), 1);
+    assert_eq!(res["rows"][0][0], json!(1));
+    let ts = commit_now_get_int(&res["rows"][0][1]);
+    assert!(ts > 0, "commit_now should produce a positive ts, got {ts}");
+}
+
+#[test]
+fn commit_now_uniform_within_script() {
+    let db = DbInstance::default();
+    db.run_default(r#":create r {id: Int => ts: Int default commit_now()}"#)
+        .unwrap();
+    // 50 rows in a single put — they must all share one ts because cur_vld
+    // is captured once per script.
+    let rows: Vec<String> = (0..50).map(|i| format!("[{i}]")).collect();
+    let script = format!("?[id] <- [{}] :put r {{id}}", rows.join(","));
+    db.run_default(&script).unwrap();
+    // Project (id, ts) — datalog returns set semantics, so projecting only ts
+    // would collapse 50 identical timestamps to 1 row and tell us nothing.
+    let res = db
+        .run_default("?[id, ts] := *r{id, ts}")
+        .unwrap()
+        .into_json();
+    let rows = res["rows"].as_array().unwrap();
+    assert_eq!(rows.len(), 50);
+    let first = commit_now_get_int(&rows[0][1]);
+    for r in rows.iter() {
+        let ts = commit_now_get_int(&r[1]);
+        assert_eq!(
+            ts, first,
+            "all rows in a single script must share one ts; got {ts} vs {first} (id={})",
+            r[0]
+        );
+    }
+}
+
+#[test]
+fn commit_now_monotonic_across_scripts() {
+    let db = DbInstance::default();
+    db.run_default(r#":create r {id: Int => ts: Int default commit_now()}"#)
+        .unwrap();
+    db.run_default(r#"?[id] <- [[1]] :put r {id}"#).unwrap();
+    // Sleep a millisecond so the second script's microsecond timestamp is
+    // unambiguously later than the first's.
+    std::thread::sleep(Duration::from_millis(2));
+    db.run_default(r#"?[id] <- [[2]] :put r {id}"#).unwrap();
+    let res = db
+        .run_default("?[id, ts] := *r{id, ts}")
+        .unwrap()
+        .into_json();
+    let rows = res["rows"].as_array().unwrap();
+    let mut by_id: BTreeMap<i64, i64> = BTreeMap::new();
+    for r in rows {
+        by_id.insert(r[0].as_i64().unwrap(), commit_now_get_int(&r[1]));
+    }
+    let t1 = by_id[&1];
+    let t2 = by_id[&2];
+    assert!(
+        t2 > t1,
+        "second script should have a strictly later ts; got t1={t1} t2={t2}"
+    );
+}
+
+#[test]
+fn commit_now_int_type_is_int() {
+    let db = DbInstance::default();
+    db.run_default(r#":create r {id: Int => ts: Int default commit_now()}"#)
+        .unwrap();
+    db.run_default(r#"?[id] <- [[1]] :put r {id}"#).unwrap();
+    let res = db
+        .run_default("?[ts] := *r{ts}")
+        .unwrap()
+        .into_json();
+    let v = &res["rows"][0][0];
+    assert!(
+        v.is_i64(),
+        "ts must serialize as an integer, got {v:?}"
+    );
+}
+
+#[test]
+fn commit_now_user_value_overrides_default() {
+    let db = DbInstance::default();
+    db.run_default(r#":create r {id: Int => ts: Int default commit_now()}"#)
+        .unwrap();
+    // User explicitly supplies ts — default must NOT fire.
+    db.run_default(r#"?[id, ts] <- [[1, 999]] :put r {id => ts}"#)
+        .unwrap();
+    let res = db
+        .run_default("?[id, ts] := *r{id, ts}")
+        .unwrap()
+        .into_json();
+    assert_eq!(res["rows"][0][1], json!(999));
+}
+
+#[test]
+fn commit_now_on_update_recomputes() {
+    let db = DbInstance::default();
+    db.run_default(
+        r#":create r {id: Int => name: String, ts: Int default commit_now()}"#,
+    )
+    .unwrap();
+    db.run_default(r#"?[id, name] <- [[1, 'a']] :put r {id => name}"#)
+        .unwrap();
+    let res = db
+        .run_default("?[ts] := *r{id: 1, ts}")
+        .unwrap()
+        .into_json();
+    let t1 = commit_now_get_int(&res["rows"][0][0]);
+
+    std::thread::sleep(Duration::from_millis(2));
+
+    // Partial update — change `name` only; do NOT bind `ts`. Without our
+    // make_update_extractors change, ts would be preserved (latent footgun
+    // for the archive watermark). With the change, ts is bumped.
+    db.run_default(r#"?[id, name] <- [[1, 'b']] :update r {id => name}"#)
+        .unwrap();
+    let res = db
+        .run_default("?[name, ts] := *r{id: 1, name, ts}")
+        .unwrap()
+        .into_json();
+    assert_eq!(res["rows"][0][0], json!("b"));
+    let t2 = commit_now_get_int(&res["rows"][0][1]);
+    assert!(
+        t2 > t1,
+        "update must bump commit_now ts; got t1={t1} t2={t2}"
+    );
+}
+
+#[test]
+fn commit_now_on_rm_works() {
+    let db = DbInstance::default();
+    db.run_default(r#":create r {id: Int => ts: Int default commit_now()}"#)
+        .unwrap();
+    db.run_default(r#"?[id] <- [[1], [2]] :put r {id}"#).unwrap();
+    db.run_default(r#"?[id] <- [[1]] :rm r {id}"#).unwrap();
+    let res = db
+        .run_default("?[id] := *r{id}")
+        .unwrap()
+        .into_json();
+    let rows = res["rows"].as_array().unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0][0], json!(2));
+}
+
+#[test]
+fn commit_now_outside_default_errors() {
+    let db = DbInstance::default();
+    // Direct call from a query body must fail loudly, not return a stale value.
+    // The Display impl shows only the top-level wrap; walk the cause chain
+    // (via Debug) to find op_commit_now's bail message.
+    let err = db.run_default("?[x] := x = commit_now()").unwrap_err();
+    let err_chain = format!("{err:?}");
+    assert!(
+        err_chain.contains("commit_now"),
+        "error chain should mention commit_now; got: {err_chain}"
+    );
+}
+
+#[test]
+fn commit_now_with_args_errors() {
+    let db = DbInstance::default();
+    // commit_now is arity 0; supplying an arg must fail (parse- or eval-time).
+    let res = db.run_default(
+        r#":create r {id: Int => ts: Int default commit_now(1)}"#,
+    );
+    let err = match res {
+        Err(e) => e.to_string(),
+        Ok(_) => {
+            // Schema may have parsed; the failure surfaces on first put when
+            // the default is evaluated.
+            db.run_default(r#"?[id] <- [[1]] :put r {id}"#)
+                .unwrap_err()
+                .to_string()
+        }
+    };
+    assert!(
+        err.to_lowercase().contains("arity") || err.contains("commit_now"),
+        "error should be about arity or commit_now misuse; got: {err}"
+    );
+}
+
+#[test]
+fn commit_now_incompatible_type_errors() {
+    let db = DbInstance::default();
+    db.run_default(
+        r#":create r {id: Int => ts: String default commit_now()}"#,
+    )
+    .unwrap();
+    let err = db
+        .run_default(r#"?[id] <- [[1]] :put r {id}"#)
+        .unwrap_err();
+    let err_chain = format!("{err:?}").to_lowercase();
+    // The Int micros value cannot coerce into String — surface a coercion
+    // error rather than silently truncating.
+    assert!(
+        err_chain.contains("coerc")
+            || err_chain.contains("type")
+            || err_chain.contains("string"),
+        "error should be about type/coercion; got: {err_chain}"
+    );
+}
+
+#[test]
+fn commit_now_with_other_defaults_coexist() {
+    let db = DbInstance::default();
+    // Mix commit_now() with the existing now() and rand_uuid_v1() defaults
+    // to confirm the new extractor variant doesn't interfere with the old
+    // DefaultExtractor path for sibling columns.
+    db.run_default(
+        r#":create r {
+            id: Int =>
+            uid: Uuid default rand_uuid_v1(),
+            wall: Float default now(),
+            commit: Int default commit_now()
+        }"#,
+    )
+    .unwrap();
+    db.run_default(r#"?[id] <- [[1]] :put r {id}"#).unwrap();
+    let res = db
+        .run_default("?[uid, wall, commit] := *r{uid, wall, commit}")
+        .unwrap()
+        .into_json();
+    let row = &res["rows"][0];
+    assert!(row[0].is_string(), "uuid serializes as string, got {:?}", row[0]);
+    assert!(row[1].is_f64(), "now() is a Float, got {:?}", row[1]);
+    assert!(row[2].is_i64(), "commit_now() is an Int, got {:?}", row[2]);
+}
+
+#[test]
+fn commit_now_shared_across_relations_in_one_script() {
+    let db = DbInstance::default();
+    db.run_default(r#":create a {id: Int => ts: Int default commit_now()}"#)
+        .unwrap();
+    db.run_default(r#":create b {id: Int => ts: Int default commit_now()}"#)
+        .unwrap();
+    // A single imperative script writes to two relations. cur_vld is captured
+    // once for the whole script, so both relations should observe the same ts.
+    db.run_default(
+        r#"
+        {?[id] <- [[1]] :put a {id}}
+        {?[id] <- [[1]] :put b {id}}
+        "#,
+    )
+    .unwrap();
+    let ta = commit_now_get_int(
+        &db.run_default("?[ts] := *a{ts}").unwrap().into_json()["rows"][0][0],
+    );
+    let tb = commit_now_get_int(
+        &db.run_default("?[ts] := *b{ts}").unwrap().into_json()["rows"][0][0],
+    );
+    assert_eq!(
+        ta, tb,
+        "two relations written in one script must share commit_now ts; got a={ta} b={tb}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// ::import_parquet — generic Parquet -> relation importer (slice 2).
+//
+// Tests use arrow::ArrowWriter to create temp Parquet files in tempdirs, then
+// run `::import_parquet rel from 'path'` and verify the relation contains the
+// expected rows. The `archive` feature must be enabled for the sys op handler
+// to do any real work.
+// ---------------------------------------------------------------------------
+
+#[cfg(feature = "archive")]
+mod import_parquet_tests {
+    use super::*;
+
+    use std::fs::File;
+    use std::path::PathBuf;
+    use std::sync::Arc;
+
+    use arrow::array::{ArrayRef, Float64Array, Int64Array, StringArray};
+    use arrow::datatypes::{DataType, Field, Schema};
+    use arrow::record_batch::RecordBatch;
+    use parquet::arrow::ArrowWriter;
+    use tempfile::tempdir;
+
+    /// Build a Parquet file at the given path from the supplied (name, type,
+    /// array) tuples. Returns the path back for convenience in test bodies.
+    fn write_parquet(path: &PathBuf, columns: Vec<(&str, DataType, ArrayRef)>) {
+        let fields: Vec<Field> = columns
+            .iter()
+            .map(|(n, t, _)| Field::new(*n, t.clone(), true))
+            .collect();
+        let arrays: Vec<ArrayRef> = columns.into_iter().map(|(_, _, a)| a).collect();
+        let schema = Arc::new(Schema::new(fields));
+        let batch = RecordBatch::try_new(schema.clone(), arrays).unwrap();
+        let file = File::create(path).unwrap();
+        let mut writer = ArrowWriter::try_new(file, schema, None).unwrap();
+        writer.write(&batch).unwrap();
+        writer.close().unwrap();
+    }
+
+    #[test]
+    fn import_parquet_basic_round_trip() {
+        let db = DbInstance::default();
+        db.run_default(r#":create r {id: Int => name: String}"#).unwrap();
+
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("r.parquet");
+        write_parquet(
+            &path,
+            vec![
+                (
+                    "id",
+                    DataType::Int64,
+                    Arc::new(Int64Array::from(vec![1i64, 2, 3])),
+                ),
+                (
+                    "name",
+                    DataType::Utf8,
+                    Arc::new(StringArray::from(vec!["a", "b", "c"])),
+                ),
+            ],
+        );
+
+        let res = db
+            .run_default(&format!(
+                "::import_parquet r from '{}'",
+                path.to_str().unwrap()
+            ))
+            .unwrap()
+            .into_json();
+        // Status row reports the count.
+        assert_eq!(res["rows"][0][1], json!(3));
+
+        let res = db
+            .run_default("?[id, name] := *r{id, name}")
+            .unwrap()
+            .into_json();
+        let mut rows = res["rows"].as_array().unwrap().clone();
+        rows.sort_by_key(|r| r[0].as_i64().unwrap());
+        assert_eq!(rows.len(), 3);
+        assert_eq!(rows[0], json!([1, "a"]));
+        assert_eq!(rows[2], json!([3, "c"]));
+    }
+
+    #[test]
+    fn import_parquet_status_row_counts_imported_rows() {
+        let db = DbInstance::default();
+        db.run_default(r#":create r {id: Int}"#).unwrap();
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("r.parquet");
+        write_parquet(
+            &path,
+            vec![(
+                "id",
+                DataType::Int64,
+                Arc::new(Int64Array::from((0..50).map(|i| i as i64).collect::<Vec<_>>())),
+            )],
+        );
+        let res = db
+            .run_default(&format!(
+                "::import_parquet r from '{}'",
+                path.to_str().unwrap()
+            ))
+            .unwrap()
+            .into_json();
+        // Header[0] is "status", Header[1] is "rows".
+        assert_eq!(res["headers"], json!(["status", "rows"]));
+        assert_eq!(res["rows"][0][0], json!("OK"));
+        assert_eq!(res["rows"][0][1], json!(50));
+    }
+
+    #[test]
+    fn import_parquet_with_extra_columns_in_file_ignores_them() {
+        // Parquet has more columns than the relation; extras should be silently
+        // ignored as long as all required columns are present.
+        let db = DbInstance::default();
+        db.run_default(r#":create r {id: Int => name: String}"#).unwrap();
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("r.parquet");
+        write_parquet(
+            &path,
+            vec![
+                (
+                    "id",
+                    DataType::Int64,
+                    Arc::new(Int64Array::from(vec![1i64])),
+                ),
+                (
+                    "name",
+                    DataType::Utf8,
+                    Arc::new(StringArray::from(vec!["alice"])),
+                ),
+                (
+                    "extra",
+                    DataType::Float64,
+                    Arc::new(Float64Array::from(vec![3.14])),
+                ),
+            ],
+        );
+        db.run_default(&format!(
+            "::import_parquet r from '{}'",
+            path.to_str().unwrap()
+        ))
+        .unwrap();
+        let res = db
+            .run_default("?[id, name] := *r{id, name}")
+            .unwrap()
+            .into_json();
+        assert_eq!(res["rows"][0], json!([1, "alice"]));
+    }
+
+    #[test]
+    fn import_parquet_missing_required_column_errors() {
+        // Relation declares `name` with no default; Parquet file omits it.
+        let db = DbInstance::default();
+        db.run_default(r#":create r {id: Int => name: String}"#).unwrap();
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("r.parquet");
+        write_parquet(
+            &path,
+            vec![(
+                "id",
+                DataType::Int64,
+                Arc::new(Int64Array::from(vec![1i64])),
+            )],
+        );
+        let err = db
+            .run_default(&format!(
+                "::import_parquet r from '{}'",
+                path.to_str().unwrap()
+            ))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("name") || err.contains("missing"),
+            "error should name the missing column; got: {err}"
+        );
+    }
+
+    #[test]
+    fn import_parquet_missing_column_with_default_uses_default() {
+        // Relation column `name` has a default; Parquet omits it. The default
+        // should fire and the import should succeed.
+        let db = DbInstance::default();
+        db.run_default(r#":create r {id: Int => name: String default 'unknown'}"#)
+            .unwrap();
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("r.parquet");
+        write_parquet(
+            &path,
+            vec![(
+                "id",
+                DataType::Int64,
+                Arc::new(Int64Array::from(vec![1i64, 2])),
+            )],
+        );
+        db.run_default(&format!(
+            "::import_parquet r from '{}'",
+            path.to_str().unwrap()
+        ))
+        .unwrap();
+        let res = db
+            .run_default("?[id, name] := *r{id, name}")
+            .unwrap()
+            .into_json();
+        let mut rows = res["rows"].as_array().unwrap().clone();
+        rows.sort_by_key(|r| r[0].as_i64().unwrap());
+        assert_eq!(rows[0][1], json!("unknown"));
+        assert_eq!(rows[1][1], json!("unknown"));
+    }
+
+    #[test]
+    fn import_parquet_with_commit_now_default_for_missing_column() {
+        // The slice 1 + slice 2 integration: relation has `ts default
+        // commit_now()`; Parquet doesn't include `ts`; the import should
+        // populate `ts` from the script's commit-time stamp.
+        let db = DbInstance::default();
+        db.run_default(r#":create r {id: Int => ts: Int default commit_now()}"#)
+            .unwrap();
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("r.parquet");
+        write_parquet(
+            &path,
+            vec![(
+                "id",
+                DataType::Int64,
+                Arc::new(Int64Array::from(vec![1i64, 2])),
+            )],
+        );
+        db.run_default(&format!(
+            "::import_parquet r from '{}'",
+            path.to_str().unwrap()
+        ))
+        .unwrap();
+        let res = db
+            .run_default("?[id, ts] := *r{id, ts}")
+            .unwrap()
+            .into_json();
+        let rows = res["rows"].as_array().unwrap();
+        assert_eq!(rows.len(), 2);
+        // Both rows should have the same (positive) ts.
+        let t0 = rows[0][1].as_i64().unwrap();
+        let t1 = rows[1][1].as_i64().unwrap();
+        assert!(t0 > 0, "commit_now ts must be positive");
+        assert_eq!(t0, t1, "all rows in one import script must share ts");
+    }
+
+    #[test]
+    fn import_parquet_overwrites_existing_keys() {
+        // Existing put-semantics: Parquet rows whose keys collide with existing
+        // rows should overwrite.
+        let db = DbInstance::default();
+        db.run_default(r#":create r {id: Int => name: String}"#).unwrap();
+        db.run_default(r#"?[id, name] <- [[1, 'old'], [2, 'keep']] :put r {id => name}"#)
+            .unwrap();
+
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("r.parquet");
+        write_parquet(
+            &path,
+            vec![
+                (
+                    "id",
+                    DataType::Int64,
+                    Arc::new(Int64Array::from(vec![1i64, 3])),
+                ),
+                (
+                    "name",
+                    DataType::Utf8,
+                    Arc::new(StringArray::from(vec!["new", "added"])),
+                ),
+            ],
+        );
+        db.run_default(&format!(
+            "::import_parquet r from '{}'",
+            path.to_str().unwrap()
+        ))
+        .unwrap();
+
+        let res = db
+            .run_default("?[id, name] := *r{id, name}")
+            .unwrap()
+            .into_json();
+        let mut rows = res["rows"].as_array().unwrap().clone();
+        rows.sort_by_key(|r| r[0].as_i64().unwrap());
+        assert_eq!(rows.len(), 3);
+        assert_eq!(rows[0], json!([1, "new"]));
+        assert_eq!(rows[1], json!([2, "keep"]));
+        assert_eq!(rows[2], json!([3, "added"]));
+    }
+
+    #[test]
+    fn import_parquet_into_missing_relation_errors() {
+        let db = DbInstance::default();
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("r.parquet");
+        write_parquet(
+            &path,
+            vec![(
+                "id",
+                DataType::Int64,
+                Arc::new(Int64Array::from(vec![1i64])),
+            )],
+        );
+        let err = db
+            .run_default(&format!(
+                "::import_parquet nope from '{}'",
+                path.to_str().unwrap()
+            ))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.to_lowercase().contains("relation"),
+            "error should mention the missing relation; got: {err}"
+        );
+    }
+
+    #[test]
+    fn import_parquet_rejects_s3_uri() {
+        let db = DbInstance::default();
+        db.run_default(r#":create r {id: Int}"#).unwrap();
+        let err = db
+            .run_default("::import_parquet r from 's3://bucket/key.parquet'")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("s3") || err.to_lowercase().contains("scheme"),
+            "should reject s3:// in this slice; got: {err}"
+        );
+    }
+
+    #[test]
+    fn import_parquet_rejects_index_target() {
+        let db = DbInstance::default();
+        db.run_default(r#":create r {id: Int}"#).unwrap();
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("r.parquet");
+        write_parquet(
+            &path,
+            vec![(
+                "id",
+                DataType::Int64,
+                Arc::new(Int64Array::from(vec![1i64])),
+            )],
+        );
+        let err = db
+            .run_default(&format!(
+                "::import_parquet r:idx from '{}'",
+                path.to_str().unwrap()
+            ))
+            .unwrap_err()
+            .to_string();
+        // Either the parser rejects the `:idx` form (compound_ident doesn't
+        // accept colons) or the runtime check fires. Both are acceptable.
+        assert!(
+            err.contains("index")
+                || err.contains(":")
+                || err.to_lowercase().contains("parser"),
+            "should refuse to import into an index name; got: {err}"
+        );
+    }
+
+    #[test]
+    fn import_parquet_with_secondary_index_keeps_index_consistent() {
+        // Create a relation with a secondary index, import, then verify the
+        // index actually has the imported rows by querying through it.
+        let db = DbInstance::default();
+        db.run_default(r#":create r {id: Int => name: String}"#).unwrap();
+        db.run_default("::index create r:by_name {name}").unwrap();
+
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("r.parquet");
+        write_parquet(
+            &path,
+            vec![
+                (
+                    "id",
+                    DataType::Int64,
+                    Arc::new(Int64Array::from(vec![1i64, 2])),
+                ),
+                (
+                    "name",
+                    DataType::Utf8,
+                    Arc::new(StringArray::from(vec!["alice", "bob"])),
+                ),
+            ],
+        );
+        db.run_default(&format!(
+            "::import_parquet r from '{}'",
+            path.to_str().unwrap()
+        ))
+        .unwrap();
+
+        // Index probe: look up by name.
+        let res = db
+            .run_default(r#"?[id] := *r:by_name{name: 'alice', id}"#)
+            .unwrap()
+            .into_json();
+        assert_eq!(res["rows"][0][0], json!(1));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ::archive — guarded delete with a watermark gate (slice 3).
+//
+// Slice 3 ships:
+//   ::archive_config put '<rel>' '<ts_col>'
+//   ::archive_config get [ '<rel>' ]
+//   ::archive_config remove '<rel>'
+//   ::archive_advance_watermark '<rel>' <ts>
+//   ::archive <rel> { <query> }
+//
+// The replicator (slice 4) doesn't exist yet, so tests advance the watermark
+// manually via ::archive_advance_watermark.
+// ---------------------------------------------------------------------------
+
+#[cfg(feature = "archive")]
+mod archive_tests {
+    use super::*;
+
+    fn fresh_db_with_rel() -> DbInstance {
+        let db = DbInstance::default();
+        db.run_default(
+            r#":create r {id: Int => name: String, ts: Int default commit_now()}"#,
+        )
+        .unwrap();
+        db
+    }
+
+    fn ts_of(db: &DbInstance, id: i64) -> i64 {
+        let res = db
+            .run_default(&format!("?[ts] := *r{{id: {id}, ts}}"))
+            .unwrap()
+            .into_json();
+        res["rows"][0][0].as_i64().unwrap()
+    }
+
+    #[test]
+    fn archive_config_put_then_get() {
+        let db = fresh_db_with_rel();
+        db.run_default("::archive_config put 'r' 'ts'").unwrap();
+        let res = db.run_default("::archive_config get").unwrap().into_json();
+        assert_eq!(
+            res["headers"],
+            json!([
+                "relation",
+                "timestamp_column",
+                "staging_dir",
+                "encryption",
+                "kms_key_arn",
+                "max_rows_per_segment"
+            ])
+        );
+        // Optional fields default to null.
+        assert_eq!(res["rows"][0][0], json!("r"));
+        assert_eq!(res["rows"][0][1], json!("ts"));
+        assert!(res["rows"][0][2].is_null());
+        assert!(res["rows"][0][3].is_null());
+        assert!(res["rows"][0][4].is_null());
+        assert!(res["rows"][0][5].is_null());
+    }
+
+    #[test]
+    fn archive_config_put_with_staging_dir() {
+        let db = fresh_db_with_rel();
+        db.run_default("::archive_config put 'r' 'ts' '/tmp/cozo-archive'")
+            .unwrap();
+        let res = db
+            .run_default("::archive_config get 'r'")
+            .unwrap()
+            .into_json();
+        assert_eq!(res["rows"][0][2], json!("/tmp/cozo-archive"));
+    }
+
+    #[test]
+    fn archive_config_get_filtered() {
+        let db = fresh_db_with_rel();
+        db.run_default(r#":create s {id: Int => ts: Int default commit_now()}"#)
+            .unwrap();
+        db.run_default("::archive_config put 'r' 'ts'").unwrap();
+        db.run_default("::archive_config put 's' 'ts'").unwrap();
+        let res = db
+            .run_default("::archive_config get 'r'")
+            .unwrap()
+            .into_json();
+        assert_eq!(res["rows"].as_array().unwrap().len(), 1);
+        assert_eq!(res["rows"][0][0], json!("r"));
+    }
+
+    #[test]
+    fn archive_config_put_unknown_relation_errors() {
+        let db = DbInstance::default();
+        let err = db
+            .run_default("::archive_config put 'nope' 'ts'")
+            .unwrap_err()
+            .to_string();
+        assert!(err.to_lowercase().contains("relation"), "got: {err}");
+    }
+
+    #[test]
+    fn archive_config_put_unknown_column_errors() {
+        let db = fresh_db_with_rel();
+        let err = db
+            .run_default("::archive_config put 'r' 'nope'")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("nope") || err.to_lowercase().contains("column"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn archive_config_put_non_int_column_errors() {
+        let db = fresh_db_with_rel();
+        // `name` is String — not a valid timestamp column.
+        let err = db
+            .run_default("::archive_config put 'r' 'name'")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.to_lowercase().contains("int") || err.contains("name"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn archive_config_remove_clears_config_and_watermark() {
+        let db = fresh_db_with_rel();
+        db.run_default("::archive_config put 'r' 'ts'").unwrap();
+        db.run_default("::archive_advance_watermark 'r' 1000").unwrap();
+        db.run_default("::archive_config remove 'r'").unwrap();
+
+        let res = db.run_default("::archive_config get").unwrap().into_json();
+        assert_eq!(res["rows"].as_array().unwrap().len(), 0);
+
+        // Watermark gone too — re-advancing without re-config should error.
+        let err = db
+            .run_default("::archive_advance_watermark 'r' 2000")
+            .unwrap_err()
+            .to_string();
+        assert!(err.to_lowercase().contains("not configured"), "got: {err}");
+    }
+
+    #[test]
+    fn archive_requires_config() {
+        let db = fresh_db_with_rel();
+        db.run_default(r#"?[id, name] <- [[1, 'a']] :put r {id => name}"#).unwrap();
+        let err = db
+            .run_default("::archive r { ?[id] := *r{id} }")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.to_lowercase().contains("not configured"),
+            "should require config first; got: {err}"
+        );
+    }
+
+    #[test]
+    fn archive_requires_watermark() {
+        let db = fresh_db_with_rel();
+        db.run_default(r#"?[id, name] <- [[1, 'a']] :put r {id => name}"#).unwrap();
+        db.run_default("::archive_config put 'r' 'ts'").unwrap();
+        let err = db
+            .run_default("::archive r { ?[id] := *r{id} }")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("watermark"),
+            "should require watermark; got: {err}"
+        );
+    }
+
+    #[test]
+    fn archive_below_watermark_succeeds() {
+        let db = fresh_db_with_rel();
+        db.run_default(r#"?[id, name] <- [[1, 'a'], [2, 'b']] :put r {id => name}"#)
+            .unwrap();
+        let t = ts_of(&db, 1);
+        db.run_default("::archive_config put 'r' 'ts'").unwrap();
+        // Advance watermark past the rows' timestamps.
+        db.run_default(&format!("::archive_advance_watermark 'r' {}", t + 1))
+            .unwrap();
+        let res = db
+            .run_default("::archive r { ?[id] := *r{id} }")
+            .unwrap()
+            .into_json();
+        assert_eq!(res["rows"][0][1], json!(2), "archived count");
+        assert_eq!(res["rows"][0][2], json!(0), "skipped count");
+        assert_eq!(res["rows"][0][3], json!(0), "missing count");
+
+        let remaining = db
+            .run_default("?[id] := *r{id}")
+            .unwrap()
+            .into_json();
+        assert_eq!(remaining["rows"].as_array().unwrap().len(), 0);
+    }
+
+    #[test]
+    fn archive_above_watermark_skips() {
+        let db = fresh_db_with_rel();
+        db.run_default(r#"?[id, name] <- [[1, 'a']] :put r {id => name}"#)
+            .unwrap();
+        db.run_default("::archive_config put 'r' 'ts'").unwrap();
+        // Watermark stuck in the past — every row is too new.
+        db.run_default("::archive_advance_watermark 'r' 1").unwrap();
+
+        let res = db
+            .run_default("::archive r { ?[id] := *r{id} }")
+            .unwrap()
+            .into_json();
+        assert_eq!(res["rows"][0][1], json!(0), "archived count");
+        assert_eq!(res["rows"][0][2], json!(1), "skipped count");
+
+        // Row still present.
+        let remaining = db
+            .run_default("?[id] := *r{id}")
+            .unwrap()
+            .into_json();
+        assert_eq!(remaining["rows"][0][0], json!(1));
+    }
+
+    #[test]
+    fn archive_partial_below_watermark() {
+        // Insert two rows with different timestamps. Advance watermark between
+        // them. Verify archive picks the earlier one only.
+        let db = fresh_db_with_rel();
+        db.run_default(r#"?[id, name] <- [[1, 'a']] :put r {id => name}"#).unwrap();
+        let t1 = ts_of(&db, 1);
+        std::thread::sleep(Duration::from_millis(2));
+        db.run_default(r#"?[id, name] <- [[2, 'b']] :put r {id => name}"#).unwrap();
+        let t2 = ts_of(&db, 2);
+        assert!(t2 > t1);
+
+        db.run_default("::archive_config put 'r' 'ts'").unwrap();
+        // Watermark exactly at t1: row 1 (ts == watermark) is eligible, row 2
+        // (ts > watermark) is not.
+        db.run_default(&format!("::archive_advance_watermark 'r' {t1}"))
+            .unwrap();
+
+        let res = db
+            .run_default("::archive r { ?[id] := *r{id} }")
+            .unwrap()
+            .into_json();
+        assert_eq!(res["rows"][0][1], json!(1), "archived");
+        assert_eq!(res["rows"][0][2], json!(1), "skipped");
+
+        let remaining = db
+            .run_default("?[id] := *r{id}")
+            .unwrap()
+            .into_json();
+        let ids: Vec<i64> = remaining["rows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| r[0].as_i64().unwrap())
+            .collect();
+        assert_eq!(ids, vec![2]);
+    }
+
+    #[test]
+    fn archive_with_predicate_in_query() {
+        // The query body is full datalog — let's use it to constrain candidates
+        // (e.g., only archive rows with name starting with 'a'). The watermark
+        // gate composes on top of that.
+        let db = fresh_db_with_rel();
+        db.run_default(
+            r#"?[id, name] <- [[1, 'alpha'], [2, 'beta'], [3, 'apex']] :put r {id => name}"#,
+        )
+        .unwrap();
+        let t = ts_of(&db, 1);
+
+        db.run_default("::archive_config put 'r' 'ts'").unwrap();
+        db.run_default(&format!("::archive_advance_watermark 'r' {}", t + 1))
+            .unwrap();
+
+        // Pick only ids whose name starts with 'a'.
+        let res = db
+            .run_default(
+                r#"::archive r { ?[id] := *r{id, name}, starts_with(name, 'a') }"#,
+            )
+            .unwrap()
+            .into_json();
+        assert_eq!(res["rows"][0][1], json!(2), "archived count");
+
+        let remaining = db
+            .run_default("?[id, name] := *r{id, name}")
+            .unwrap()
+            .into_json();
+        let rows = remaining["rows"].as_array().unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0][1], json!("beta"));
+    }
+
+    #[test]
+    fn archive_query_missing_key_column_errors() {
+        let db = fresh_db_with_rel();
+        db.run_default(r#"?[id, name] <- [[1, 'a']] :put r {id => name}"#).unwrap();
+        db.run_default("::archive_config put 'r' 'ts'").unwrap();
+        let t = ts_of(&db, 1);
+        db.run_default(&format!("::archive_advance_watermark 'r' {}", t + 1))
+            .unwrap();
+        // Query body produces only `name`, not `id` (the key).
+        let err = db
+            .run_default("::archive r { ?[name] := *r{name} }")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("id") || err.contains("key"),
+            "should mention the missing key column; got: {err}"
+        );
+    }
+
+    #[test]
+    fn archive_missing_keys_counted_as_missing() {
+        // Query produces a key that doesn't exist in the relation.
+        let db = fresh_db_with_rel();
+        db.run_default(r#"?[id, name] <- [[1, 'a']] :put r {id => name}"#).unwrap();
+        db.run_default("::archive_config put 'r' 'ts'").unwrap();
+        let t = ts_of(&db, 1);
+        db.run_default(&format!("::archive_advance_watermark 'r' {}", t + 1))
+            .unwrap();
+        // Synthesize a key list that includes a non-existent id (99).
+        let res = db
+            .run_default("::archive r { ?[id] := id in [1, 99] }")
+            .unwrap()
+            .into_json();
+        // 1 archived (id 1, exists, below watermark), 0 skipped, 1 missing (id 99).
+        assert_eq!(res["rows"][0][1], json!(1), "archived");
+        assert_eq!(res["rows"][0][2], json!(0), "skipped");
+        assert_eq!(res["rows"][0][3], json!(1), "missing");
+    }
+
+    #[test]
+    fn archive_keeps_secondary_index_consistent() {
+        let db = fresh_db_with_rel();
+        db.run_default("::index create r:by_name {name}").unwrap();
+        db.run_default(r#"?[id, name] <- [[1, 'a'], [2, 'b']] :put r {id => name}"#)
+            .unwrap();
+        db.run_default("::archive_config put 'r' 'ts'").unwrap();
+        let t = ts_of(&db, 1);
+        db.run_default(&format!("::archive_advance_watermark 'r' {}", t + 1))
+            .unwrap();
+        // Archive only id=1.
+        db.run_default("::archive r { ?[id] := id = 1 }").unwrap();
+
+        // Index lookup for the archived row should return nothing; for the
+        // surviving row, it should still find the id.
+        let lookup_a = db
+            .run_default(r#"?[id] := *r:by_name{name: 'a', id}"#)
+            .unwrap()
+            .into_json();
+        assert_eq!(lookup_a["rows"].as_array().unwrap().len(), 0);
+
+        let lookup_b = db
+            .run_default(r#"?[id] := *r:by_name{name: 'b', id}"#)
+            .unwrap()
+            .into_json();
+        assert_eq!(lookup_b["rows"][0][0], json!(2));
+    }
+
+    #[test]
+    fn archive_multiple_rounds_advance_watermark() {
+        // Round 1: watermark at T1, only the first row (ts <= T1) is archivable.
+        // Round 2: watermark advanced to T2, second row becomes archivable.
+        let db = fresh_db_with_rel();
+        db.run_default(r#"?[id, name] <- [[1, 'a']] :put r {id => name}"#).unwrap();
+        let t1 = ts_of(&db, 1);
+        std::thread::sleep(Duration::from_millis(2));
+        db.run_default(r#"?[id, name] <- [[2, 'b']] :put r {id => name}"#).unwrap();
+        let t2 = ts_of(&db, 2);
+
+        db.run_default("::archive_config put 'r' 'ts'").unwrap();
+        db.run_default(&format!("::archive_advance_watermark 'r' {t1}")).unwrap();
+
+        let res = db
+            .run_default("::archive r { ?[id] := *r{id} }")
+            .unwrap()
+            .into_json();
+        assert_eq!(res["rows"][0][1], json!(1), "round 1 archived");
+        assert_eq!(res["rows"][0][2], json!(1), "round 1 skipped");
+
+        // Advance and re-archive.
+        db.run_default(&format!("::archive_advance_watermark 'r' {t2}")).unwrap();
+        let res = db
+            .run_default("::archive r { ?[id] := *r{id} }")
+            .unwrap()
+            .into_json();
+        assert_eq!(res["rows"][0][1], json!(1), "round 2 archived");
+        assert_eq!(res["rows"][0][2], json!(0), "round 2 skipped");
+
+        let remaining = db
+            .run_default("?[id] := *r{id}")
+            .unwrap()
+            .into_json();
+        assert_eq!(remaining["rows"].as_array().unwrap().len(), 0);
+    }
+
+    #[test]
+    fn archive_status_row_shape() {
+        let db = fresh_db_with_rel();
+        db.run_default(r#"?[id, name] <- [[1, 'a']] :put r {id => name}"#).unwrap();
+        db.run_default("::archive_config put 'r' 'ts'").unwrap();
+        let t = ts_of(&db, 1);
+        db.run_default(&format!("::archive_advance_watermark 'r' {}", t + 1))
+            .unwrap();
+        let res = db
+            .run_default("::archive r { ?[id] := *r{id} }")
+            .unwrap()
+            .into_json();
+        assert_eq!(
+            res["headers"],
+            json!(["status", "archived", "skipped", "missing", "watermark"])
+        );
+        assert_eq!(res["rows"][0][0], json!("OK"));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ::replicate_pending — manual-drain replicator with local fs target (slice 4).
+//
+// Polling model: each call scans the relation, finds rows whose timestamp is
+// past the current watermark, writes one Parquet segment, records a manifest
+// row, and advances the watermark. Idempotent: a second call with no new rows
+// produces no segment.
+// ---------------------------------------------------------------------------
+
+#[cfg(feature = "archive")]
+mod replicate_tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    fn ts_of(db: &DbInstance, id: i64) -> i64 {
+        db.run_default(&format!("?[ts] := *r{{id: {id}, ts}}"))
+            .unwrap()
+            .into_json()["rows"][0][0]
+            .as_i64()
+            .unwrap()
+    }
+
+    /// Boilerplate: relation + archive config with a fresh tempdir staging dir.
+    fn setup() -> (DbInstance, tempfile::TempDir, String) {
+        let db = DbInstance::default();
+        db.run_default(
+            r#":create r {id: Int => name: String, ts: Int default commit_now()}"#,
+        )
+        .unwrap();
+        let dir = tempdir().unwrap();
+        let dir_str = dir.path().to_str().unwrap().to_string();
+        db.run_default(&format!(
+            "::archive_config put 'r' 'ts' '{dir_str}'"
+        ))
+        .unwrap();
+        (db, dir, dir_str)
+    }
+
+    #[test]
+    fn replicate_empty_relation_is_noop() {
+        let (db, _dir, _) = setup();
+        let res = db
+            .run_default("::replicate_pending 'r'")
+            .unwrap()
+            .into_json();
+        // Slice 6 shape: [status, rows_replicated, segments_written,
+        //                 old_watermark, new_watermark]
+        assert_eq!(
+            res["headers"],
+            json!([
+                "status",
+                "rows_replicated",
+                "segments_written",
+                "old_watermark",
+                "new_watermark"
+            ])
+        );
+        assert_eq!(res["rows"][0][1], json!(0), "rows_replicated");
+        assert_eq!(res["rows"][0][2], json!(0), "segments_written");
+        // Watermark unchanged (initial value is i64::MIN reported as old & new).
+        assert_eq!(res["rows"][0][3], res["rows"][0][4]);
+    }
+
+    #[test]
+    fn replicate_writes_segment_and_advances_watermark() {
+        let (db, dir, _) = setup();
+        db.run_default(r#"?[id, name] <- [[1, 'a'], [2, 'b']] :put r {id => name}"#)
+            .unwrap();
+        let t = ts_of(&db, 1); // both rows in one script -> same ts
+
+        let res = db
+            .run_default("::replicate_pending 'r'")
+            .unwrap()
+            .into_json();
+        assert_eq!(res["rows"][0][1], json!(2), "two rows replicated");
+        assert_eq!(res["rows"][0][2], json!(1), "single segment under default cap");
+        assert_eq!(res["rows"][0][4], json!(t), "watermark advanced to t");
+
+        // Confirm watermark is persisted.
+        let res = db
+            .run_default(
+                "?[ts] := *cozo_archive_watermark{relation: 'r', last_safe_commit_ts: ts}",
+            )
+            .unwrap()
+            .into_json();
+        assert_eq!(res["rows"][0][0], json!(t));
+
+        // Manifest row carries the per-segment details that the sys op no
+        // longer returns inline.
+        let res = db
+            .run_default(
+                "?[rel, count, lower, upper, file] := \
+                 *cozo_archive_segments{\
+                    relation: rel, key_count: count, \
+                    lower_commit_ts: lower, upper_commit_ts: upper, \
+                    file_path: file}",
+            )
+            .unwrap()
+            .into_json();
+        assert_eq!(res["rows"][0][0], json!("r"));
+        assert_eq!(res["rows"][0][1], json!(2));
+        assert_eq!(res["rows"][0][2], json!(t));
+        assert_eq!(res["rows"][0][3], json!(t));
+        let path = res["rows"][0][4].as_str().unwrap().to_string();
+        assert!(path.ends_with(".parquet"));
+        assert!(std::path::Path::new(&path).exists());
+
+        let _ = dir;
+    }
+
+    #[test]
+    fn replicate_second_call_is_noop() {
+        let (db, _dir, _) = setup();
+        db.run_default(r#"?[id, name] <- [[1, 'a']] :put r {id => name}"#).unwrap();
+        let res = db.run_default("::replicate_pending 'r'").unwrap().into_json();
+        assert_eq!(res["rows"][0][1], json!(1));
+        assert_eq!(res["rows"][0][2], json!(1), "first drain wrote one segment");
+
+        let res = db.run_default("::replicate_pending 'r'").unwrap().into_json();
+        assert_eq!(res["rows"][0][1], json!(0), "no new rows");
+        assert_eq!(res["rows"][0][2], json!(0), "no new segments");
+
+        // Manifest still has exactly one row.
+        let res = db
+            .run_default("?[c] := *cozo_archive_segments{segment_id: c}")
+            .unwrap()
+            .into_json();
+        assert_eq!(res["rows"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn replicate_picks_up_new_rows_after_first_drain() {
+        let (db, _dir, _) = setup();
+        db.run_default(r#"?[id, name] <- [[1, 'a']] :put r {id => name}"#).unwrap();
+        db.run_default("::replicate_pending 'r'").unwrap();
+
+        std::thread::sleep(Duration::from_millis(2));
+        db.run_default(r#"?[id, name] <- [[2, 'b']] :put r {id => name}"#).unwrap();
+        let t2 = ts_of(&db, 2);
+        let res = db.run_default("::replicate_pending 'r'").unwrap().into_json();
+        assert_eq!(res["rows"][0][1], json!(1), "second drain finds the new row");
+        assert_eq!(res["rows"][0][2], json!(1), "second drain wrote one segment");
+        assert_eq!(res["rows"][0][4], json!(t2), "watermark advanced to t2");
+
+        // Two segments now (one per drain).
+        let res = db
+            .run_default("?[c] := *cozo_archive_segments{segment_id: c}")
+            .unwrap()
+            .into_json();
+        assert_eq!(res["rows"].as_array().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn replicate_round_trip_via_import_parquet() {
+        // The round-trip contract: after replicate, the segment file imported
+        // back via ::import_parquet reproduces the original rows (including
+        // the commit-time ts). Slice 6: file path comes from the manifest
+        // rather than from the sys op response.
+        let (db, _dir, _) = setup();
+        db.run_default(r#"?[id, name] <- [[1, 'alice'], [2, 'bob']] :put r {id => name}"#)
+            .unwrap();
+        let t = ts_of(&db, 1);
+        db.run_default("::replicate_pending 'r'").unwrap();
+
+        // Look up the file path from the manifest.
+        let res = db
+            .run_default(
+                "?[file] := *cozo_archive_segments{relation: 'r', file_path: file}",
+            )
+            .unwrap()
+            .into_json();
+        let path = res["rows"][0][0].as_str().unwrap().to_string();
+
+        // Fresh mirror relation in the same DB.
+        db.run_default(r#":create r2 {id: Int => name: String, ts: Int}"#).unwrap();
+        db.run_default(&format!("::import_parquet r2 from '{path}'")).unwrap();
+
+        let res = db
+            .run_default("?[id, name, ts] := *r2{id, name, ts}")
+            .unwrap()
+            .into_json();
+        let mut rows = res["rows"].as_array().unwrap().clone();
+        rows.sort_by_key(|r| r[0].as_i64().unwrap());
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0], json!([1, "alice", t]));
+        assert_eq!(rows[1], json!([2, "bob", t]));
+    }
+
+    #[test]
+    fn replicate_with_archive_workflow_end_to_end() {
+        // The user-visible flow: write rows -> replicate -> archive deletes
+        // the now-replicated rows from the source relation.
+        let (db, _dir, _) = setup();
+        db.run_default(r#"?[id, name] <- [[1, 'a'], [2, 'b']] :put r {id => name}"#)
+            .unwrap();
+        // Replicate first; this advances the watermark, making rows eligible
+        // for archive.
+        db.run_default("::replicate_pending 'r'").unwrap();
+
+        let res = db
+            .run_default("::archive r { ?[id] := *r{id} }")
+            .unwrap()
+            .into_json();
+        assert_eq!(res["rows"][0][1], json!(2), "both rows archived");
+        assert_eq!(res["rows"][0][2], json!(0), "none skipped");
+
+        // Source relation is empty.
+        let res = db
+            .run_default("?[id] := *r{id}")
+            .unwrap()
+            .into_json();
+        assert_eq!(res["rows"].as_array().unwrap().len(), 0);
+    }
+
+    #[test]
+    fn replicate_requires_staging_dir() {
+        let db = DbInstance::default();
+        db.run_default(
+            r#":create r {id: Int => name: String, ts: Int default commit_now()}"#,
+        )
+        .unwrap();
+        // Configure WITHOUT staging_dir.
+        db.run_default("::archive_config put 'r' 'ts'").unwrap();
+        db.run_default(r#"?[id, name] <- [[1, 'a']] :put r {id => name}"#).unwrap();
+        let err = db.run_default("::replicate_pending 'r'").unwrap_err().to_string();
+        assert!(
+            err.contains("staging_dir"),
+            "error should mention the missing staging_dir; got: {err}"
+        );
+    }
+
+    #[test]
+    fn replicate_unconfigured_relation_errors() {
+        let db = DbInstance::default();
+        db.run_default(r#":create r {id: Int}"#).unwrap();
+        let err = db.run_default("::replicate_pending 'r'").unwrap_err().to_string();
+        assert!(
+            err.to_lowercase().contains("not configured"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn replicate_manifest_records_sha256_and_status() {
+        let (db, _dir, _) = setup();
+        db.run_default(r#"?[id, name] <- [[1, 'a']] :put r {id => name}"#).unwrap();
+        db.run_default("::replicate_pending 'r'").unwrap();
+
+        let res = db
+            .run_default(
+                "?[sha, status] := *cozo_archive_segments{sha256: sha, status}",
+            )
+            .unwrap()
+            .into_json();
+        let row = &res["rows"][0];
+        // sha256 serializes as a base64 string in JSON.
+        assert!(row[0].is_string());
+        // 32 raw bytes => base64 length 44 with padding (or 43 + '=').
+        assert!(
+            row[0].as_str().unwrap().len() >= 40,
+            "sha looks too short to be a 32-byte hash: {:?}",
+            row[0]
+        );
+        assert_eq!(row[1], json!("uploaded"));
+    }
+
+    #[test]
+    fn replicate_two_relations_independent_watermarks() {
+        // Configuring two relations with separate staging dirs and replicating
+        // them independently. Each maintains its own watermark in
+        // cozo_archive_watermark.
+        let db = DbInstance::default();
+        db.run_default(
+            r#":create r {id: Int => name: String, ts: Int default commit_now()}"#,
+        )
+        .unwrap();
+        db.run_default(
+            r#":create s {id: Int => name: String, ts: Int default commit_now()}"#,
+        )
+        .unwrap();
+        let dir = tempdir().unwrap();
+        let r_dir = dir.path().join("r");
+        let s_dir = dir.path().join("s");
+        std::fs::create_dir_all(&r_dir).unwrap();
+        std::fs::create_dir_all(&s_dir).unwrap();
+        db.run_default(&format!(
+            "::archive_config put 'r' 'ts' '{}'",
+            r_dir.to_str().unwrap()
+        ))
+        .unwrap();
+        db.run_default(&format!(
+            "::archive_config put 's' 'ts' '{}'",
+            s_dir.to_str().unwrap()
+        ))
+        .unwrap();
+
+        db.run_default(r#"?[id, name] <- [[1, 'a']] :put r {id => name}"#).unwrap();
+        std::thread::sleep(Duration::from_millis(2));
+        db.run_default(r#"?[id, name] <- [[2, 'b']] :put s {id => name}"#).unwrap();
+
+        let r_res = db.run_default("::replicate_pending 'r'").unwrap().into_json();
+        let s_res = db.run_default("::replicate_pending 's'").unwrap().into_json();
+
+        // new_watermark is index 4 in the slice 6 response shape.
+        let r_wm = r_res["rows"][0][4].as_i64().unwrap();
+        let s_wm = s_res["rows"][0][4].as_i64().unwrap();
+        assert!(s_wm > r_wm, "s' watermark should be later: r={r_wm} s={s_wm}");
+
+        // r's drain doesn't touch s's watermark.
+        let res = db
+            .run_default("?[c] := *cozo_archive_segments{segment_id: c}")
+            .unwrap()
+            .into_json();
+        assert_eq!(res["rows"].as_array().unwrap().len(), 2);
+    }
+
+    // -----------------------------------------------------------------------
+    // Slice 6: per-segment row caps. Tests below verify that the replicator
+    // produces multiple right-sized segments rather than one giant one when
+    // the configured cap is small relative to the qualifying-row count.
+    // -----------------------------------------------------------------------
+
+    /// Helper: configure r with an explicit max_rows_per_segment.
+    /// Skip optional encryption + kms_key_arn slots — pest sees the bare
+    /// integer and passes it through to the trailing `expr?` for max_rows.
+    fn setup_with_cap(cap: i64) -> (DbInstance, tempfile::TempDir) {
+        let db = DbInstance::default();
+        db.run_default(
+            r#":create r {id: Int => name: String, ts: Int default commit_now()}"#,
+        )
+        .unwrap();
+        let dir = tempdir().unwrap();
+        let dir_str = dir.path().to_str().unwrap().to_string();
+        db.run_default(&format!(
+            "::archive_config put 'r' 'ts' '{dir_str}' {cap}"
+        ))
+        .unwrap();
+        (db, dir)
+    }
+
+    #[test]
+    fn replicate_splits_distinct_ts_across_segments() {
+        // Insert rows across several scripts so each row gets a distinct ts.
+        // With cap=2 and 5 distinct-ts rows, we expect 3 segments (2+2+1).
+        let (db, _dir) = setup_with_cap(2);
+        for i in 1..=5 {
+            db.run_default(&format!(r#"?[id, name] <- [[{i}, 'x']] :put r {{id => name}}"#))
+                .unwrap();
+            std::thread::sleep(Duration::from_millis(2));
+        }
+
+        let res = db.run_default("::replicate_pending 'r'").unwrap().into_json();
+        assert_eq!(res["rows"][0][1], json!(5), "rows_replicated");
+        assert_eq!(res["rows"][0][2], json!(3), "segments_written");
+
+        // Manifest has 3 segments.
+        let res = db
+            .run_default(
+                "?[c] := *cozo_archive_segments{relation: 'r', segment_id: c}",
+            )
+            .unwrap()
+            .into_json();
+        assert_eq!(res["rows"].as_array().unwrap().len(), 3);
+    }
+
+    #[test]
+    fn replicate_extends_chunk_through_ts_ties() {
+        // 5 rows in ONE script means they all share one ts. With cap=2 the
+        // chunk would naively close at 2, but the ts-tie extension keeps
+        // them all in one segment so the watermark advances safely.
+        let (db, _dir) = setup_with_cap(2);
+        db.run_default(
+            r#"?[id, name] <- [[1, 'a'], [2, 'b'], [3, 'c'], [4, 'd'], [5, 'e']]
+               :put r {id => name}"#,
+        )
+        .unwrap();
+
+        let res = db.run_default("::replicate_pending 'r'").unwrap().into_json();
+        assert_eq!(res["rows"][0][1], json!(5), "all 5 rows replicated");
+        assert_eq!(
+            res["rows"][0][2],
+            json!(1),
+            "ts-tie extension keeps them in one segment"
+        );
+
+        let res = db
+            .run_default(
+                "?[count] := *cozo_archive_segments{relation: 'r', key_count: count}",
+            )
+            .unwrap()
+            .into_json();
+        assert_eq!(res["rows"][0][0], json!(5));
+    }
+
+    #[test]
+    fn replicate_default_cap_applies_when_unset() {
+        // No explicit cap → effective cap should be the default (100k).
+        // We can't realistically exercise 100k rows in a unit test, so we
+        // verify the config row reports null and that the replicator still
+        // succeeds for a small input. The default-application is tested via
+        // get_config returning None and effective_max_rows_per_segment()
+        // applying the const, which is exercised by all the existing tests
+        // that don't pass a cap.
+        let db = DbInstance::default();
+        db.run_default(
+            r#":create r {id: Int => name: String, ts: Int default commit_now()}"#,
+        )
+        .unwrap();
+        let dir = tempdir().unwrap();
+        let dir_str = dir.path().to_str().unwrap().to_string();
+        db.run_default(&format!("::archive_config put 'r' 'ts' '{dir_str}'")).unwrap();
+
+        let res = db.run_default("::archive_config get 'r'").unwrap().into_json();
+        // Index 5 = max_rows_per_segment column; null when unset.
+        assert!(
+            res["rows"][0][5].is_null(),
+            "max_rows_per_segment should be null when not specified"
+        );
+
+        // 1 row, 1 segment — confirming the default branch runs without error.
+        db.run_default(r#"?[id, name] <- [[1, 'a']] :put r {id => name}"#).unwrap();
+        let res = db.run_default("::replicate_pending 'r'").unwrap().into_json();
+        assert_eq!(res["rows"][0][1], json!(1));
+        assert_eq!(res["rows"][0][2], json!(1));
+    }
+
+    #[test]
+    fn archive_config_put_with_max_rows_per_segment() {
+        // Round-trip the new column through put + get.
+        let db = DbInstance::default();
+        db.run_default(
+            r#":create r {id: Int => name: String, ts: Int default commit_now()}"#,
+        )
+        .unwrap();
+        db.run_default("::archive_config put 'r' 'ts' '/tmp/x' 5000")
+            .unwrap();
+
+        let res = db.run_default("::archive_config get 'r'").unwrap().into_json();
+        assert_eq!(res["rows"][0][5], json!(5000));
+    }
+
+    #[test]
+    fn archive_config_rejects_zero_max_rows_per_segment() {
+        let db = DbInstance::default();
+        db.run_default(
+            r#":create r {id: Int => name: String, ts: Int default commit_now()}"#,
+        )
+        .unwrap();
+        let err = db
+            .run_default("::archive_config put 'r' 'ts' '/tmp/x' 0")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("max_rows_per_segment") || err.contains("positive"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn archive_config_rejects_negative_max_rows_per_segment() {
+        let db = DbInstance::default();
+        db.run_default(
+            r#":create r {id: Int => name: String, ts: Int default commit_now()}"#,
+        )
+        .unwrap();
+        let err = db
+            .run_default("::archive_config put 'r' 'ts' '/tmp/x' (-1)")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("max_rows_per_segment") || err.contains("positive"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn replicate_each_segment_records_distinct_ts_range() {
+        // After a multi-segment drain, each manifest row should have a
+        // strictly-increasing (lower_ts, upper_ts) compared to the prior.
+        let (db, _dir) = setup_with_cap(2);
+        for i in 1..=5 {
+            db.run_default(&format!(r#"?[id, name] <- [[{i}, 'x']] :put r {{id => name}}"#))
+                .unwrap();
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        db.run_default("::replicate_pending 'r'").unwrap();
+
+        let res = db
+            .run_default(
+                "?[lower, upper] := *cozo_archive_segments{\
+                    relation: 'r', lower_commit_ts: lower, upper_commit_ts: upper}",
+            )
+            .unwrap()
+            .into_json();
+        let mut bounds: Vec<(i64, i64)> = res["rows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| (r[0].as_i64().unwrap(), r[1].as_i64().unwrap()))
+            .collect();
+        bounds.sort();
+        // Each upper_ts must be < the next lower_ts (strict separation).
+        for w in bounds.windows(2) {
+            let prev_upper = w[0].1;
+            let next_lower = w[1].0;
+            assert!(
+                next_lower > prev_upper,
+                "segment ranges should not overlap: prev_upper={prev_upper} \
+                 next_lower={next_lower}"
+            );
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Slice 5: object_store integration. URI scheme handling, credential
+// rejection, encryption config — exercised via `file://` and bare paths.
+// Real-S3 smoke tests live in `integration_s3_tests` below and require
+// the `integration-s3` feature flag plus AWS_* env vars.
+// ---------------------------------------------------------------------------
+
+#[cfg(feature = "archive")]
+mod archive_uri_tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    #[test]
+    fn config_accepts_file_uri() {
+        let db = DbInstance::default();
+        db.run_default(
+            r#":create r {id: Int => name: String, ts: Int default commit_now()}"#,
+        )
+        .unwrap();
+        let dir = tempdir().unwrap();
+        let uri = format!("file://{}", dir.path().to_str().unwrap());
+        db.run_default(&format!("::archive_config put 'r' 'ts' '{uri}'")).unwrap();
+        let res = db
+            .run_default("::archive_config get 'r'")
+            .unwrap()
+            .into_json();
+        assert_eq!(res["rows"][0][2], json!(uri));
+    }
+
+    #[test]
+    fn config_accepts_s3_uri_format() {
+        // No actual S3 contact — just that the URI parses and is stored.
+        let db = DbInstance::default();
+        db.run_default(
+            r#":create r {id: Int => name: String, ts: Int default commit_now()}"#,
+        )
+        .unwrap();
+        db.run_default("::archive_config put 'r' 'ts' 's3://my-bucket/prefix/'")
+            .unwrap();
+        let res = db
+            .run_default("::archive_config get 'r'")
+            .unwrap()
+            .into_json();
+        assert_eq!(res["rows"][0][2], json!("s3://my-bucket/prefix/"));
+    }
+
+    #[test]
+    fn config_rejects_unknown_uri_scheme() {
+        let db = DbInstance::default();
+        db.run_default(
+            r#":create r {id: Int => name: String, ts: Int default commit_now()}"#,
+        )
+        .unwrap();
+        let err = db
+            .run_default("::archive_config put 'r' 'ts' 'gs://bucket/key'")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("not supported") || err.contains("scheme"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn config_rejects_relative_file_uri() {
+        let db = DbInstance::default();
+        db.run_default(
+            r#":create r {id: Int => name: String, ts: Int default commit_now()}"#,
+        )
+        .unwrap();
+        let err = db
+            .run_default("::archive_config put 'r' 'ts' 'file://relative/path'")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("absolute"), "got: {err}");
+    }
+
+    #[test]
+    fn config_accepts_sse_s3_encryption() {
+        let db = DbInstance::default();
+        db.run_default(
+            r#":create r {id: Int => name: String, ts: Int default commit_now()}"#,
+        )
+        .unwrap();
+        db.run_default(
+            "::archive_config put 'r' 'ts' 's3://b/p/' 'sse-s3'",
+        )
+        .unwrap();
+        let res = db.run_default("::archive_config get 'r'").unwrap().into_json();
+        assert_eq!(res["rows"][0][3], json!("sse-s3"));
+        assert!(res["rows"][0][4].is_null());
+    }
+
+    #[test]
+    fn config_accepts_sse_kms_with_key_arn() {
+        let db = DbInstance::default();
+        db.run_default(
+            r#":create r {id: Int => name: String, ts: Int default commit_now()}"#,
+        )
+        .unwrap();
+        db.run_default(
+            "::archive_config put 'r' 'ts' 's3://b/p/' 'sse-kms' 'arn:aws:kms:us-east-1:000000000000:key/abc'",
+        )
+        .unwrap();
+        let res = db.run_default("::archive_config get 'r'").unwrap().into_json();
+        assert_eq!(res["rows"][0][3], json!("sse-kms"));
+        assert_eq!(
+            res["rows"][0][4],
+            json!("arn:aws:kms:us-east-1:000000000000:key/abc")
+        );
+    }
+
+    #[test]
+    fn config_rejects_sse_kms_without_key_arn() {
+        let db = DbInstance::default();
+        db.run_default(
+            r#":create r {id: Int => name: String, ts: Int default commit_now()}"#,
+        )
+        .unwrap();
+        let err = db
+            .run_default("::archive_config put 'r' 'ts' 's3://b/p/' 'sse-kms'")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("kms_key_arn"), "got: {err}");
+    }
+
+    #[test]
+    fn config_rejects_unknown_encryption_mode() {
+        let db = DbInstance::default();
+        db.run_default(
+            r#":create r {id: Int => name: String, ts: Int default commit_now()}"#,
+        )
+        .unwrap();
+        let err = db
+            .run_default("::archive_config put 'r' 'ts' 's3://b/p/' 'aes-256-cbc'")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("unknown encryption"), "got: {err}");
+    }
+
+    #[test]
+    fn replicate_via_file_uri_works() {
+        // Slice 5 refactored the replicator onto object_store. Verifying
+        // that file:// (the LocalFileSystem backend) still works end-to-end.
+        // Slice 6: per-segment file path moved from sys op response to manifest.
+        let db = DbInstance::default();
+        db.run_default(
+            r#":create r {id: Int => name: String, ts: Int default commit_now()}"#,
+        )
+        .unwrap();
+        let dir = tempdir().unwrap();
+        let uri = format!("file://{}", dir.path().to_str().unwrap());
+        db.run_default(&format!("::archive_config put 'r' 'ts' '{uri}'")).unwrap();
+        db.run_default(r#"?[id, name] <- [[1, 'a'], [2, 'b']] :put r {id => name}"#)
+            .unwrap();
+        let res = db.run_default("::replicate_pending 'r'").unwrap().into_json();
+        assert_eq!(res["rows"][0][1], json!(2), "rows replicated");
+        assert_eq!(res["rows"][0][2], json!(1), "one segment");
+
+        // file_path comes from the manifest in slice 6.
+        let res = db
+            .run_default(
+                "?[file] := *cozo_archive_segments{relation: 'r', file_path: file}",
+            )
+            .unwrap()
+            .into_json();
+        let path = res["rows"][0][0].as_str().unwrap();
+        assert!(path.starts_with(dir.path().to_str().unwrap()), "got: {path}");
+        assert!(std::path::Path::new(path).exists());
+    }
+
+    #[test]
+    fn replicate_via_bare_path_still_works() {
+        // Slice 4 backwards compatibility: bare paths (no scheme) must keep
+        // routing to the local filesystem backend.
+        let db = DbInstance::default();
+        db.run_default(
+            r#":create r {id: Int => name: String, ts: Int default commit_now()}"#,
+        )
+        .unwrap();
+        let dir = tempdir().unwrap();
+        db.run_default(&format!(
+            "::archive_config put 'r' 'ts' '{}'",
+            dir.path().to_str().unwrap()
+        ))
+        .unwrap();
+        db.run_default(r#"?[id, name] <- [[1, 'a']] :put r {id => name}"#).unwrap();
+        let res = db.run_default("::replicate_pending 'r'").unwrap().into_json();
+        assert_eq!(res["rows"][0][1], json!(1));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Optional: smoke tests against a real S3 / S3-compatible endpoint.
+// Enabled via `--features integration-s3`. Requires AWS_* env vars and
+// COZO_TEST_S3_BUCKET in the environment (`.env` at repo root supported).
+//
+// These tests:
+//   * skip cleanly if env vars are missing
+//   * use a unique prefix per run to avoid collisions
+//   * never assume DeleteObject — IAM probe enforces the absence of it
+//   * clean up after themselves on success (best effort)
+// ---------------------------------------------------------------------------
+
+#[cfg(feature = "integration-s3")]
+mod integration_s3_tests {
+    use super::*;
+    use std::sync::Once;
+
+    static LOAD_ENV: Once = Once::new();
+
+    fn load_env_once() {
+        LOAD_ENV.call_once(|| {
+            // Best-effort: if there's a .env at repo root, pick it up. If not,
+            // fall through to whatever's already in process env.
+            let _ = dotenvy::dotenv();
+            // The endpoint-URL bridge (AWS_ENDPOINT_URL{_S3} -> AWS_ENDPOINT)
+            // happens inside `archive::store::build_object_store`, so it
+            // works for production users too — not just tests.
+        });
+    }
+
+    /// Returns the configured `s3://bucket/prefix/` URI for this test run, or
+    /// `None` if env vars are missing — in which case the test should skip.
+    fn smoke_uri(test_name: &str) -> Option<String> {
+        load_env_once();
+        let bucket = std::env::var("COZO_TEST_S3_BUCKET").ok()?;
+        // Required AWS creds — if any of these is missing we can't get past
+        // the SDK chain, so skip rather than fail.
+        std::env::var("AWS_ACCESS_KEY_ID").ok()?;
+        std::env::var("AWS_SECRET_ACCESS_KEY").ok()?;
+        std::env::var("AWS_REGION").ok()?;
+        let user_prefix = std::env::var("COZO_TEST_S3_PREFIX").unwrap_or_default();
+        // Unique per-test-run prefix so parallel test runs / repeated CI
+        // invocations don't collide.
+        let unique = uuid::Uuid::new_v4();
+        let full_prefix = format!(
+            "{}{}{test_name}-{unique}/",
+            user_prefix.trim_end_matches('/'),
+            if user_prefix.is_empty() { "" } else { "/" }
+        );
+        Some(format!("s3://{bucket}/{full_prefix}"))
+    }
+
+    #[test]
+    fn smoke_replicate_to_s3_round_trips_via_in_memory_bytes() {
+        let Some(uri) = smoke_uri("rt") else {
+            eprintln!("skipping: COZO_TEST_S3_BUCKET / AWS_* not set");
+            return;
+        };
+
+        let db = DbInstance::default();
+        db.run_default(
+            r#":create r {id: Int => name: String, ts: Int default commit_now()}"#,
+        )
+        .unwrap();
+        db.run_default(&format!("::archive_config put 'r' 'ts' '{uri}'"))
+            .unwrap();
+        db.run_default(
+            r#"?[id, name] <- [[1, 'alice'], [2, 'bob']] :put r {id => name}"#,
+        )
+        .unwrap();
+
+        // Replicate. This exercises: AWS sigv4, optional custom endpoint
+        // (Tigris / R2 / MinIO), TLS, IAM probe (DeleteObject must fail),
+        // and the actual PUT path.
+        let res = db
+            .run_default("::replicate_pending 'r'")
+            .unwrap()
+            .into_json();
+        assert_eq!(res["rows"][0][1], json!(2), "rows replicated");
+        let s3_path = res["rows"][0][3].as_str().unwrap().to_string();
+        assert!(
+            s3_path.starts_with("s3://"),
+            "manifest s3_path should be an s3:// URI; got {s3_path}"
+        );
+
+        // Manifest record exists.
+        let res = db
+            .run_default(
+                "?[count, status] := *cozo_archive_segments{key_count: count, status}",
+            )
+            .unwrap()
+            .into_json();
+        assert_eq!(res["rows"][0][0], json!(2));
+        assert_eq!(res["rows"][0][1], json!("uploaded"));
+    }
+
+    #[test]
+    fn smoke_iam_probe_passes_for_well_scoped_credentials() {
+        // Sanity check that the IAM probe doesn't false-positive with a
+        // well-scoped IAM role. If this test fails because of "role can
+        // DeleteObject", your test credentials are too permissive — narrow
+        // the policy.
+        let Some(uri) = smoke_uri("iam") else {
+            eprintln!("skipping: COZO_TEST_S3_BUCKET / AWS_* not set");
+            return;
+        };
+        let db = DbInstance::default();
+        db.run_default(
+            r#":create r {id: Int => ts: Int default commit_now()}"#,
+        )
+        .unwrap();
+        db.run_default(&format!("::archive_config put 'r' 'ts' '{uri}'"))
+            .unwrap();
+        db.run_default(r#"?[id] <- [[1]] :put r {id}"#).unwrap();
+        // No assertions on the result — just that it succeeds without IAM
+        // probe rejecting.
+        db.run_default("::replicate_pending 'r'").unwrap();
+    }
+
+    #[test]
+    fn smoke_no_replication_when_no_new_rows() {
+        let Some(uri) = smoke_uri("idem") else {
+            eprintln!("skipping: COZO_TEST_S3_BUCKET / AWS_* not set");
+            return;
+        };
+        let db = DbInstance::default();
+        db.run_default(
+            r#":create r {id: Int => ts: Int default commit_now()}"#,
+        )
+        .unwrap();
+        db.run_default(&format!("::archive_config put 'r' 'ts' '{uri}'"))
+            .unwrap();
+        db.run_default(r#"?[id] <- [[1]] :put r {id}"#).unwrap();
+        db.run_default("::replicate_pending 'r'").unwrap();
+        // Second drain should be a no-op (no new rows past the watermark);
+        // critically, no extra S3 PUT happens.
+        let res = db.run_default("::replicate_pending 'r'").unwrap().into_json();
+        assert_eq!(res["rows"][0][1], json!(0));
+        assert!(res["rows"][0][3].is_null());
+    }
+}

@@ -13,10 +13,14 @@ query_script_inner_no_bracket = { (option | rule | const_rule | fixed_rule)+ }
 imperative_script = {SOI ~ imperative_stmt+ ~ EOI}
 sys_script = {SOI ~ "::" ~ (list_relations_op | list_columns_op | list_indices_op | remove_relations_op | trigger_relation_op |
                     trigger_relation_show_op | rename_relations_op | running_op | kill_op | explain_op |
-                    access_level_op | index_op | vec_idx_op | fts_idx_op | lsh_idx_op | compact_op | list_fixed_rules) ~ EOI}
+                    access_level_op | index_op | vec_idx_op | fts_idx_op | lsh_idx_op | compact_op | list_fixed_rules |
+                    import_parquet_op | archive_config_op | archive_advance_watermark_op | archive_op |
+                    replicate_pending_op) ~ EOI}
 sys_script_inner = {"{" ~ "::" ~ (list_relations_op | list_columns_op | list_indices_op | remove_relations_op | trigger_relation_op |
                     trigger_relation_show_op | rename_relations_op | running_op | kill_op | explain_op |
-                    access_level_op | index_op | vec_idx_op | fts_idx_op | lsh_idx_op | compact_op | list_fixed_rules) ~ "}"}
+                    access_level_op | index_op | vec_idx_op | fts_idx_op | lsh_idx_op | compact_op | list_fixed_rules |
+                    import_parquet_op | archive_config_op | archive_advance_watermark_op | archive_op |
+                    replicate_pending_op) ~ "}"}
 index_op = {"index" ~ (index_create | index_drop)}
 vec_idx_op = {"hnsw" ~ (index_create_adv | index_drop)}
 fts_idx_op = {"fts" ~ (index_create_adv | index_drop)}
@@ -36,6 +40,14 @@ describe_relation_op = {"describe" ~ compound_or_index_ident ~ string?}
 remove_relations_op = {"remove" ~ (compound_ident ~ ",")* ~ compound_ident }
 rename_relations_op = {"rename" ~ (rename_pair ~ ",")* ~ rename_pair }
 access_level_op = {"access_level" ~ access_level ~ (compound_ident ~ ",")* ~ compound_ident}
+import_parquet_op = {"import_parquet" ~ compound_ident ~ "from" ~ string}
+archive_config_op = {"archive_config" ~ (archive_config_put | archive_config_get | archive_config_remove)}
+archive_config_put = {"put" ~ string ~ string ~ string? ~ string? ~ string? ~ expr?}
+replicate_pending_op = {"replicate_pending" ~ string}
+archive_config_get = {"get" ~ string?}
+archive_config_remove = {"remove" ~ string}
+archive_advance_watermark_op = {"archive_advance_watermark" ~ string ~ expr}
+archive_op = {"archive" ~ compound_ident ~ "{" ~ query_script_inner_no_bracket ~ "}"}
 access_level = {("normal" | "protected" | "read_only" | "hidden")}
 trigger_relation_show_op = {"show_triggers" ~ compound_ident }
 trigger_relation_op = {"set_triggers" ~ compound_ident ~ trigger_clause* }

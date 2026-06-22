@@ -1258,6 +1258,61 @@ impl<'s, S: Storage<'s>> Db<S> {
                     vec![vec![DataValue::from(OK_STR)]],
                 ))
             }
+            SysOp::ImportParquet(rel_name, uri) => {
+                if read_only {
+                    bail!("Cannot import parquet in read-only mode");
+                }
+                let cur_vld = current_validity();
+                self.run_import_parquet(tx, rel_name, uri, cur_vld)
+            }
+            SysOp::ArchiveConfigPut(
+                rel,
+                ts_col,
+                staging_dir,
+                encryption,
+                kms_key_arn,
+                max_rows_per_segment,
+            ) => {
+                if read_only {
+                    bail!("Cannot configure archive in read-only mode");
+                }
+                self.run_archive_config_put(
+                    tx,
+                    rel,
+                    ts_col,
+                    staging_dir.as_deref(),
+                    encryption.as_deref(),
+                    kms_key_arn.as_deref(),
+                    *max_rows_per_segment,
+                )
+            }
+            SysOp::ArchiveConfigGet(rel) => self.run_archive_config_get(tx, rel.as_deref()),
+            SysOp::ArchiveConfigRemove(rel) => {
+                if read_only {
+                    bail!("Cannot remove archive config in read-only mode");
+                }
+                self.run_archive_config_remove(tx, rel)
+            }
+            SysOp::ArchiveAdvanceWatermark(rel, ts) => {
+                if read_only {
+                    bail!("Cannot advance watermark in read-only mode");
+                }
+                self.run_archive_advance_watermark(tx, rel, *ts)
+            }
+            SysOp::Archive(rel, prog) => {
+                if read_only {
+                    bail!("Cannot archive in read-only mode");
+                }
+                let cur_vld = current_validity();
+                self.run_archive(tx, rel, prog, cur_vld)
+            }
+            SysOp::ReplicatePending(rel) => {
+                if read_only {
+                    bail!("Cannot replicate in read-only mode");
+                }
+                let cur_vld = current_validity();
+                self.run_replicate_pending(tx, rel, cur_vld)
+            }
             SysOp::CreateIndex(rel_name, idx_name, cols) => {
                 if read_only {
                     bail!("Cannot create index in read-only mode");
@@ -1451,6 +1506,636 @@ impl<'s, S: Storage<'s>> Db<S> {
         tx.commit_tx()?;
         Ok(res)
     }
+
+    /// Handle `::import_parquet <relation> from '<uri>'`. Reads the Parquet
+    /// file at `uri`, matches its columns by name to the relation's schema,
+    /// and writes the rows.
+    ///
+    /// Behaves like `import_relations`: triggers and event callbacks are NOT
+    /// fired (this is a bulk-load path, not a logical-change path). Indices
+    /// (regular secondary indices) are kept consistent by the same code that
+    /// `import_relations` uses; HNSW/FTS/LSH indices are not yet supported and
+    /// the import will refuse to run if the target relation has any.
+    #[allow(unused_variables)]
+    fn run_import_parquet(
+        &'s self,
+        tx: &mut SessionTx<'_>,
+        rel_name: &Symbol,
+        uri: &SmartString<LazyCompact>,
+        cur_vld: ValidityTs,
+    ) -> Result<NamedRows> {
+        #[cfg(not(feature = "archive"))]
+        bail!("::import_parquet requires the 'archive' feature to be enabled");
+
+        #[cfg(feature = "archive")]
+        {
+            use crate::archive::import::{read_parquet_local, resolve_local_path};
+
+            // Reject names that look like an index (`rel:idx`); we only import
+            // into base relations.
+            if rel_name.name.contains(':') {
+                bail!(
+                    "cannot import into '{}': use ::import_parquet on a base relation, not an index",
+                    rel_name.name
+                );
+            }
+
+            let path = resolve_local_path(uri)?;
+            let pd = read_parquet_local(&path)?;
+
+            let handle = tx.get_relation(rel_name.name.as_str(), false)?;
+
+            if handle.access_level < AccessLevel::Protected {
+                bail!(InsufficientAccessLevel(
+                    handle.name.to_string(),
+                    "parquet import".to_string(),
+                    handle.access_level
+                ));
+            }
+
+            // HNSW/FTS/LSH side-indices have their own write paths that this
+            // bulk loader does not yet drive. Refuse rather than silently
+            // produce inconsistent state.
+            if !handle.hnsw_indices.is_empty()
+                || !handle.fts_indices.is_empty()
+                || !handle.lsh_indices.is_empty()
+            {
+                bail!(
+                    "::import_parquet does not yet support relations with HNSW/FTS/LSH indices ('{}'); \
+                    use Db::import_relations instead",
+                    handle.name
+                );
+            }
+
+            // Map each Parquet column to its position in the file so we can
+            // pluck values into the relation's column order. Columns absent
+            // from the Parquet file are tolerated only when the corresponding
+            // stored column has a default expression.
+            let header2idx: BTreeMap<&str, usize> = pd
+                .headers
+                .iter()
+                .enumerate()
+                .map(|(i, h)| (h.as_str(), i))
+                .collect();
+
+            let key_indices: Vec<(Option<usize>, &ColumnDef)> = handle
+                .metadata
+                .keys
+                .iter()
+                .map(|col| (header2idx.get(col.name.as_str()).copied(), col))
+                .collect();
+            let val_indices: Vec<(Option<usize>, &ColumnDef)> = handle
+                .metadata
+                .non_keys
+                .iter()
+                .map(|col| (header2idx.get(col.name.as_str()).copied(), col))
+                .collect();
+
+            // Required columns (no default) must be present in the file.
+            for (idx, col) in key_indices.iter().chain(val_indices.iter()) {
+                if idx.is_none() && col.default_gen.is_none() {
+                    bail!(
+                        "Parquet file is missing required column '{}' for relation '{}' \
+                        (and the column has no default)",
+                        col.name,
+                        handle.name
+                    );
+                }
+            }
+
+            let has_indices = !handle.indices.is_empty();
+            let mut row_count: usize = 0;
+            for row in &pd.rows {
+                let resolve = |idx: Option<usize>, col: &ColumnDef| -> Result<DataValue> {
+                    let raw = match idx {
+                        Some(i) => row
+                            .get(i)
+                            .ok_or_else(|| miette!("Parquet row too short: {:?}", row))?
+                            .clone(),
+                        None => {
+                            let expr = col.default_gen.as_ref().ok_or_else(|| {
+                                miette!("internal: no default and no value for {}", col.name)
+                            })?;
+                            // commit_now() refuses to evaluate as a constant by
+                            // design (slice 1); resolve it here from cur_vld
+                            // so missing-column-with-default works for the
+                            // archive-managed timestamp.
+                            if matches!(
+                                expr,
+                                crate::data::expr::Expr::Apply { op, args, .. }
+                                    if op.name == "OP_COMMIT_NOW" && args.is_empty()
+                            ) {
+                                DataValue::from(cur_vld.0 .0)
+                            } else {
+                                expr.clone().eval_to_const()?
+                            }
+                        }
+                    };
+                    col.typing.coerce(raw, cur_vld)
+                };
+
+                let keys: Vec<DataValue> = key_indices
+                    .iter()
+                    .map(|(i, col)| resolve(*i, col))
+                    .try_collect()?;
+                let vals: Vec<DataValue> = val_indices
+                    .iter()
+                    .map(|(i, col)| resolve(*i, col))
+                    .try_collect()?;
+
+                let k_store = handle.encode_key_for_store(&keys, Default::default())?;
+                if has_indices {
+                    if let Some(existing) = tx.store_tx.get(&k_store, false)? {
+                        let mut old = keys.clone();
+                        extend_tuple_from_v(&mut old, &existing);
+                        for (idx_rel, extractor) in handle.indices.values() {
+                            let idx_tup =
+                                extractor.iter().map(|i| old[*i].clone()).collect_vec();
+                            let encoded =
+                                idx_rel.encode_key_for_store(&idx_tup, Default::default())?;
+                            tx.store_tx.del(&encoded)?;
+                        }
+                    }
+                }
+                let v_store = handle.encode_val_only_for_store(&vals, Default::default())?;
+                tx.store_tx.put(&k_store, &v_store)?;
+                if has_indices {
+                    let mut kv = keys;
+                    kv.extend(vals);
+                    for (idx_rel, extractor) in handle.indices.values() {
+                        let idx_tup = extractor.iter().map(|i| kv[*i].clone()).collect_vec();
+                        let encoded =
+                            idx_rel.encode_key_for_store(&idx_tup, Default::default())?;
+                        tx.store_tx.put(&encoded, &[])?;
+                    }
+                }
+                row_count += 1;
+            }
+
+            Ok(NamedRows::new(
+                vec!["status".to_string(), "rows".to_string()],
+                vec![vec![
+                    DataValue::from(OK_STR),
+                    DataValue::from(row_count as i64),
+                ]],
+            ))
+        }
+    }
+
+    /// `::archive_config put '<rel>' '<ts_col>' [<uri>] [<encryption>]
+    /// [<kms_key_arn>] [<max_rows_per_segment>]` — record that `<rel>` has its
+    /// commit-time timestamp stored in column `<ts_col>`, optionally with
+    /// destination URI, encryption mode, KMS key ARN, and per-segment row cap.
+    #[allow(unused_variables)]
+    fn run_archive_config_put(
+        &'s self,
+        tx: &mut SessionTx<'_>,
+        rel: &SmartString<LazyCompact>,
+        ts_col: &SmartString<LazyCompact>,
+        staging_dir: Option<&str>,
+        encryption: Option<&str>,
+        kms_key_arn: Option<&str>,
+        max_rows_per_segment: Option<i64>,
+    ) -> Result<NamedRows> {
+        #[cfg(not(feature = "archive"))]
+        bail!("archive sys ops require the 'archive' feature to be enabled");
+
+        #[cfg(feature = "archive")]
+        {
+            use crate::archive::manifest::{ensure_archive_system_relations, put_config};
+
+            ensure_archive_system_relations(tx)?;
+
+            // Validate target relation exists and the named column is present
+            // and Int-shaped. Catching this here turns "::archive will silently
+            // do nothing" into "::archive_config put refuses".
+            let target = tx.get_relation(rel.as_str(), false)?;
+            let col_def = target
+                .metadata
+                .keys
+                .iter()
+                .chain(target.metadata.non_keys.iter())
+                .find(|c| c.name.as_str() == ts_col.as_str())
+                .ok_or_else(|| {
+                    miette!(
+                        "relation '{}' has no column named '{}' to use as the archive timestamp",
+                        rel,
+                        ts_col
+                    )
+                })?;
+            // Allow Int and Validity (Validity is Int micros under the hood).
+            // Anything else won't satisfy the watermark gate's `<= ts` check.
+            match col_def.typing.coltype {
+                crate::data::relation::ColType::Int
+                | crate::data::relation::ColType::Validity => {}
+                _ => bail!(
+                    "archive timestamp column '{}' on relation '{}' must be Int (got {:?})",
+                    ts_col,
+                    rel,
+                    col_def.typing.coltype
+                ),
+            }
+
+            // Validate the URI early — no point storing a bogus URI.
+            if let Some(s) = staging_dir {
+                crate::archive::store::parse_destination(s)?;
+            }
+            // Validate encryption combo.
+            crate::archive::store::validate_encryption(encryption, kms_key_arn)?;
+            // Defensive — rejects accidental "encryption_secret_key=...".
+            if let Some(v) = encryption {
+                crate::archive::store::reject_credential_shaped("encryption", v)?;
+            }
+            if let Some(v) = staging_dir {
+                crate::archive::store::reject_credential_shaped("staging_dir", v)?;
+            }
+
+            // Per-segment row cap must be at least 1; a cap of 0 would loop
+            // forever, and negative caps are nonsense. The default (when
+            // None) lives in `manifest::DEFAULT_MAX_ROWS_PER_SEGMENT`.
+            if let Some(n) = max_rows_per_segment {
+                if n < 1 {
+                    bail!(
+                        "max_rows_per_segment must be a positive integer (got {n})"
+                    );
+                }
+            }
+
+            put_config(
+                tx,
+                rel.as_str(),
+                ts_col.as_str(),
+                staging_dir,
+                encryption,
+                kms_key_arn,
+                max_rows_per_segment,
+            )?;
+
+            Ok(NamedRows::new(
+                vec!["status".to_string()],
+                vec![vec![DataValue::from(OK_STR)]],
+            ))
+        }
+    }
+
+    /// `::archive_config get [<rel>]` — list configurations.
+    #[allow(unused_variables)]
+    fn run_archive_config_get(
+        &'s self,
+        tx: &mut SessionTx<'_>,
+        rel: Option<&str>,
+    ) -> Result<NamedRows> {
+        #[cfg(not(feature = "archive"))]
+        bail!("archive sys ops require the 'archive' feature to be enabled");
+
+        #[cfg(feature = "archive")]
+        {
+            use crate::archive::manifest::{
+                ensure_archive_system_relations, ARCHIVE_CONFIG_REL,
+            };
+
+            ensure_archive_system_relations(tx)?;
+
+            let cfg = tx.get_relation(ARCHIVE_CONFIG_REL, false)?;
+            let mut out = vec![];
+            for tuple_res in cfg.scan_all(tx) {
+                let tuple = tuple_res?;
+                // tuple = [relation_name, timestamp_column, staging_dir]
+                let row_rel = match tuple.first() {
+                    Some(DataValue::Str(s)) => s.clone(),
+                    _ => continue,
+                };
+                if let Some(filter) = rel {
+                    if row_rel.as_str() != filter {
+                        continue;
+                    }
+                }
+                out.push(tuple);
+            }
+
+            Ok(NamedRows::new(
+                vec![
+                    "relation".to_string(),
+                    "timestamp_column".to_string(),
+                    "staging_dir".to_string(),
+                    "encryption".to_string(),
+                    "kms_key_arn".to_string(),
+                    "max_rows_per_segment".to_string(),
+                ],
+                out,
+            ))
+        }
+    }
+
+    /// `::archive_config remove '<rel>'`
+    #[allow(unused_variables)]
+    fn run_archive_config_remove(
+        &'s self,
+        tx: &mut SessionTx<'_>,
+        rel: &SmartString<LazyCompact>,
+    ) -> Result<NamedRows> {
+        #[cfg(not(feature = "archive"))]
+        bail!("archive sys ops require the 'archive' feature to be enabled");
+
+        #[cfg(feature = "archive")]
+        {
+            use crate::archive::manifest::{ensure_archive_system_relations, remove_config};
+
+            ensure_archive_system_relations(tx)?;
+            remove_config(tx, rel.as_str())?;
+
+            Ok(NamedRows::new(
+                vec!["status".to_string()],
+                vec![vec![DataValue::from(OK_STR)]],
+            ))
+        }
+    }
+
+    /// `::archive_advance_watermark '<rel>' <ts>` — admin/test op. Slice 4
+    /// will replace this with replicator-driven advancement, but the sys op
+    /// stays available for explicit "force a watermark to a known value"
+    /// operational scenarios (e.g. coming back from disaster recovery).
+    #[allow(unused_variables)]
+    fn run_archive_advance_watermark(
+        &'s self,
+        tx: &mut SessionTx<'_>,
+        rel: &SmartString<LazyCompact>,
+        ts: i64,
+    ) -> Result<NamedRows> {
+        #[cfg(not(feature = "archive"))]
+        bail!("archive sys ops require the 'archive' feature to be enabled");
+
+        #[cfg(feature = "archive")]
+        {
+            use crate::archive::manifest::{
+                ensure_archive_system_relations, get_timestamp_column, set_watermark,
+            };
+
+            ensure_archive_system_relations(tx)?;
+
+            // Refuse to advance the watermark for a relation that hasn't been
+            // configured for archiving — otherwise users can leave themselves
+            // open to "set watermark, but no config => no `::archive` will
+            // ever work" confusion.
+            if get_timestamp_column(tx, rel.as_str())?.is_none() {
+                bail!(
+                    "relation '{rel}' is not configured for archiving; \
+                    run `::archive_config put '{rel}' '<column>'` first"
+                );
+            }
+
+            set_watermark(tx, rel.as_str(), ts)?;
+
+            Ok(NamedRows::new(
+                vec!["status".to_string(), "watermark".to_string()],
+                vec![vec![DataValue::from(OK_STR), DataValue::from(ts)]],
+            ))
+        }
+    }
+
+    /// `::archive <rel> { <query> }` — run the user query, identify rows whose
+    /// archive timestamp <= watermark, delete those rows from `<rel>`. Return a
+    /// summary of archived/skipped/missing counts.
+    #[allow(unused_variables)]
+    fn run_archive(
+        &'s self,
+        tx: &mut SessionTx<'_>,
+        rel: &Symbol,
+        prog: &InputProgram,
+        cur_vld: ValidityTs,
+    ) -> Result<NamedRows> {
+        #[cfg(not(feature = "archive"))]
+        bail!("archive sys ops require the 'archive' feature to be enabled");
+
+        #[cfg(feature = "archive")]
+        {
+            use crate::archive::manifest::{
+                ensure_archive_system_relations, get_timestamp_column, get_watermark,
+            };
+
+            ensure_archive_system_relations(tx)?;
+
+            // Resolve config and watermark up-front; clearer errors than failing
+            // mid-archive.
+            let ts_col_name = get_timestamp_column(tx, rel.name.as_str())?
+                .ok_or_else(|| miette!("relation '{}' is not configured for archiving", rel.name))?;
+            let watermark = get_watermark(tx, rel.name.as_str())?.ok_or_else(|| {
+                miette!(
+                    "no watermark set for relation '{}'; run \
+                     `::replicate_pending` (slice 4) or \
+                     `::archive_advance_watermark`",
+                    rel.name
+                )
+            })?;
+
+            let target = tx.get_relation(rel.name.as_str(), false)?;
+            if !target.hnsw_indices.is_empty()
+                || !target.fts_indices.is_empty()
+                || !target.lsh_indices.is_empty()
+            {
+                bail!(
+                    "::archive does not yet support relations with HNSW/FTS/LSH indices ('{}')",
+                    target.name
+                );
+            }
+            if target.access_level < AccessLevel::Protected {
+                bail!(InsufficientAccessLevel(
+                    target.name.to_string(),
+                    "archive".to_string(),
+                    target.access_level
+                ));
+            }
+
+            // Locate the timestamp column's offset in the full row.
+            let n_keys = target.metadata.keys.len();
+            let ts_col_idx_in_row = target
+                .metadata
+                .keys
+                .iter()
+                .chain(target.metadata.non_keys.iter())
+                .position(|c| c.name.as_str() == ts_col_name.as_str())
+                .ok_or_else(|| {
+                    miette!(
+                        "configured timestamp column '{}' no longer exists on relation '{}'",
+                        ts_col_name,
+                        rel.name
+                    )
+                })?;
+
+            // Run the user query.
+            let callback_targets = self.current_callback_targets();
+            let mut callback_collector = CallbackCollector::new();
+            let (named_rows, cleanups) = self.run_query(
+                tx,
+                prog.clone(),
+                cur_vld,
+                &callback_targets,
+                &mut callback_collector,
+                false,
+            )?;
+
+            // Match query result columns to the relation's key columns by name.
+            let mut key_pos_in_result: Vec<usize> = Vec::with_capacity(n_keys);
+            for k in target.metadata.keys.iter() {
+                let pos = named_rows
+                    .headers
+                    .iter()
+                    .position(|h| h.as_str() == k.name.as_str())
+                    .ok_or_else(|| {
+                        miette!(
+                            "::archive query must produce key column '{}' for relation '{}'",
+                            k.name,
+                            rel.name
+                        )
+                    })?;
+                key_pos_in_result.push(pos);
+            }
+
+            let has_indices = !target.indices.is_empty();
+            let mut archived: i64 = 0;
+            let mut skipped: i64 = 0;
+            let mut missing: i64 = 0;
+
+            for row in &named_rows.rows {
+                // Build the key tuple from the result row, coercing each
+                // component into the column's declared type.
+                let key: Vec<DataValue> = key_pos_in_result
+                    .iter()
+                    .zip(target.metadata.keys.iter())
+                    .map(|(pos, col)| {
+                        let v = row
+                            .get(*pos)
+                            .ok_or_else(|| miette!("query result row too short: {:?}", row))?
+                            .clone();
+                        col.typing.coerce(v, cur_vld)
+                    })
+                    .collect::<Result<_>>()?;
+
+                let k_store = target.encode_key_for_store(&key, Default::default())?;
+                let existing = match tx.store_tx.get(&k_store, false)? {
+                    None => {
+                        missing += 1;
+                        continue;
+                    }
+                    Some(v) => v,
+                };
+
+                // Read the timestamp column's value out of the stored row. If
+                // it lives in the key, we already have it; otherwise decode
+                // the value blob.
+                let ts_val: i64 = if ts_col_idx_in_row < n_keys {
+                    key[ts_col_idx_in_row].get_int().ok_or_else(|| {
+                        miette!(
+                            "timestamp column '{}' has non-integer value in stored row",
+                            ts_col_name
+                        )
+                    })?
+                } else {
+                    let val_part = &existing[crate::data::tuple::ENCODED_KEY_MIN_LEN..];
+                    let decoded: Vec<DataValue> =
+                        rmp_serde::from_slice(val_part).map_err(|e| {
+                            miette!("failed to decode value blob for archive: {e}")
+                        })?;
+                    let in_val_idx = ts_col_idx_in_row - n_keys;
+                    decoded
+                        .get(in_val_idx)
+                        .and_then(|d| d.get_int())
+                        .ok_or_else(|| {
+                            miette!(
+                                "timestamp column '{}' missing or non-integer in stored row",
+                                ts_col_name
+                            )
+                        })?
+                };
+
+                if ts_val > watermark {
+                    skipped += 1;
+                    continue;
+                }
+
+                // Eligible: drop secondary indices first (matching put/rm
+                // semantics), then the row itself.
+                if has_indices {
+                    let mut full = key.clone();
+                    extend_tuple_from_v(&mut full, &existing);
+                    for (idx_rel, extractor) in target.indices.values() {
+                        let idx_tup =
+                            extractor.iter().map(|i| full[*i].clone()).collect_vec();
+                        let encoded =
+                            idx_rel.encode_key_for_store(&idx_tup, Default::default())?;
+                        tx.store_tx.del(&encoded)?;
+                    }
+                }
+                tx.store_tx.del(&k_store)?;
+                archived += 1;
+            }
+
+            // Apply any cleanups left behind by run_query (temp stores etc.).
+            for (lower, upper) in cleanups {
+                tx.store_tx.del_range_from_persisted(&lower, &upper)?;
+            }
+
+            Ok(NamedRows::new(
+                vec![
+                    "status".to_string(),
+                    "archived".to_string(),
+                    "skipped".to_string(),
+                    "missing".to_string(),
+                    "watermark".to_string(),
+                ],
+                vec![vec![
+                    DataValue::from(OK_STR),
+                    DataValue::from(archived),
+                    DataValue::from(skipped),
+                    DataValue::from(missing),
+                    DataValue::from(watermark),
+                ]],
+            ))
+        }
+    }
+
+    /// `::replicate_pending '<rel>'` — drain pending rows of `<rel>` whose
+    /// timestamp is past the watermark into one or more Parquet segments in
+    /// the configured destination. Idempotent. Per-segment details (uuid,
+    /// file path, ts range, sha) are queryable via `cozo_archive_segments`.
+    #[allow(unused_variables)]
+    fn run_replicate_pending(
+        &'s self,
+        tx: &mut SessionTx<'_>,
+        rel: &SmartString<LazyCompact>,
+        cur_vld: ValidityTs,
+    ) -> Result<NamedRows> {
+        #[cfg(not(feature = "archive"))]
+        bail!("archive sys ops require the 'archive' feature to be enabled");
+
+        #[cfg(feature = "archive")]
+        {
+            use crate::archive::manifest::ensure_archive_system_relations;
+            use crate::archive::replicator::drain_relation;
+
+            ensure_archive_system_relations(tx)?;
+
+            let outcome = drain_relation(tx, rel.as_str(), cur_vld)?;
+
+            Ok(NamedRows::new(
+                vec![
+                    "status".to_string(),
+                    "rows_replicated".to_string(),
+                    "segments_written".to_string(),
+                    "old_watermark".to_string(),
+                    "new_watermark".to_string(),
+                ],
+                vec![vec![
+                    DataValue::from(OK_STR),
+                    DataValue::from(outcome.rows_replicated),
+                    DataValue::from(outcome.segments_written),
+                    DataValue::from(outcome.old_watermark),
+                    DataValue::from(outcome.new_watermark),
+                ]],
+            ))
+        }
+    }
+
     /// This is the entry to query evaluation
     pub(crate) fn run_query(
         &self,

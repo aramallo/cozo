@@ -926,6 +926,7 @@ pub(crate) fn get_op(name: &str) -> Option<&'static Op> {
         "uuid_timestamp" => &OP_UUID_TIMESTAMP,
         "validity" => &OP_VALIDITY,
         "now" => &OP_NOW,
+        "commit_now" => &OP_COMMIT_NOW,
         "format_timestamp" => &OP_FORMAT_TIMESTAMP,
         "parse_timestamp" => &OP_PARSE_TIMESTAMP,
         "vec" => &OP_VEC,

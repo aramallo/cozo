@@ -40,3 +40,4 @@ Cross.toml
 /venv/
 flamegraph*.svg
 TODO.md
+.env

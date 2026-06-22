@@ -47,6 +47,35 @@ pub enum SysOp {
     CreateMinHashLshIndex(MinHashLshConfig),
     RemoveIndex(Symbol, Symbol),
     DescribeRelation(Symbol, SmartString<LazyCompact>),
+    /// Bulk-load rows from a Parquet file at the given URI into the named
+    /// stored relation. Slice 2 supports local filesystem URIs only; S3 etc.
+    /// will be added in slice 5.
+    ImportParquet(Symbol, SmartString<LazyCompact>),
+    /// Upsert a row into `cozo_archive_config` for the given relation name.
+    /// Tuple is `(relation, timestamp_column, staging_dir?, encryption?,
+    /// kms_key_arn?, max_rows_per_segment?)`.
+    ArchiveConfigPut(
+        SmartString<LazyCompact>,
+        SmartString<LazyCompact>,
+        Option<SmartString<LazyCompact>>,
+        Option<SmartString<LazyCompact>>,
+        Option<SmartString<LazyCompact>>,
+        Option<i64>,
+    ),
+    /// List `_archive_config`. `None` returns all rows; `Some(rel)` filters to one.
+    ArchiveConfigGet(Option<SmartString<LazyCompact>>),
+    /// Remove a relation's archive config and watermark.
+    ArchiveConfigRemove(SmartString<LazyCompact>),
+    /// Set the watermark for a relation. Slice 3 admin/test op; slice 4's
+    /// replicator owns advancement in production.
+    ArchiveAdvanceWatermark(SmartString<LazyCompact>, i64),
+    /// Archive rows: run the query, find the rows whose timestamp <= watermark,
+    /// delete those from cozo. Skip the rest with a per-row `pending_replication`
+    /// reason.
+    Archive(Symbol, Box<InputProgram>),
+    /// Replicate any rows of the named relation whose commit-time timestamp is
+    /// past the current watermark, then advance the watermark.
+    ReplicatePending(SmartString<LazyCompact>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -139,6 +168,111 @@ pub(crate) fn parse_sys(
                 Some(desc_p) => parse_string(desc_p)?,
             };
             SysOp::DescribeRelation(rel, description)
+        }
+        Rule::import_parquet_op => {
+            let mut inner = inner.into_inner();
+            let rel_p = inner.next().unwrap();
+            let rel = Symbol::new(rel_p.as_str(), rel_p.extract_span());
+            let uri_p = inner.next().unwrap();
+            let uri = parse_string(uri_p)?;
+            SysOp::ImportParquet(rel, uri)
+        }
+        Rule::archive_config_op => {
+            let sub = inner.into_inner().next().unwrap();
+            match sub.as_rule() {
+                Rule::archive_config_put => {
+                    let mut inner = sub.into_inner();
+                    let rel = parse_string(inner.next().unwrap())?;
+                    let col = parse_string(inner.next().unwrap())?;
+
+                    // After (rel, ts_col) come 0–3 optional strings (staging,
+                    // encryption, kms_key_arn) and at most one trailing expr
+                    // (max_rows_per_segment). Strings and exprs have distinct
+                    // rule types in pest, so we route by `as_rule()` rather
+                    // than by position alone — that lets users skip middle
+                    // string slots (e.g. `put 'r' 'ts' '/tmp/x' 100` jumps
+                    // straight from staging to max_rows).
+                    let mut strings_seen: usize = 0;
+                    let mut staging_dir = None;
+                    let mut encryption = None;
+                    let mut kms_key_arn = None;
+                    let mut max_rows_per_segment: Option<i64> = None;
+                    for p in inner {
+                        match p.as_rule() {
+                            Rule::quoted_string
+                            | Rule::s_quoted_string
+                            | Rule::raw_string => {
+                                let s = parse_string(p)?;
+                                match strings_seen {
+                                    0 => staging_dir = Some(s),
+                                    1 => encryption = Some(s),
+                                    2 => kms_key_arn = Some(s),
+                                    _ => unreachable!(
+                                        "grammar limits archive_config_put to 3 optional strings"
+                                    ),
+                                }
+                                strings_seen += 1;
+                            }
+                            Rule::expr => {
+                                let e = build_expr(p, param_pool)?;
+                                let v = e.eval_to_const()?;
+                                max_rows_per_segment = Some(v.get_int().ok_or_else(|| {
+                                    miette!(
+                                        "max_rows_per_segment must be a positive integer"
+                                    )
+                                })?);
+                            }
+                            other => unreachable!(
+                                "unexpected rule in archive_config_put: {other:?}"
+                            ),
+                        }
+                    }
+                    SysOp::ArchiveConfigPut(
+                        rel,
+                        col,
+                        staging_dir,
+                        encryption,
+                        kms_key_arn,
+                        max_rows_per_segment,
+                    )
+                }
+                Rule::archive_config_get => {
+                    let rel = sub.into_inner().next().map(parse_string).transpose()?;
+                    SysOp::ArchiveConfigGet(rel)
+                }
+                Rule::archive_config_remove => {
+                    let rel = parse_string(sub.into_inner().next().unwrap())?;
+                    SysOp::ArchiveConfigRemove(rel)
+                }
+                _ => unreachable!("unexpected archive_config_op sub-rule"),
+            }
+        }
+        Rule::archive_advance_watermark_op => {
+            let mut inner = inner.into_inner();
+            let rel = parse_string(inner.next().unwrap())?;
+            let ts_expr = build_expr(inner.next().unwrap(), param_pool)?;
+            let ts_val = ts_expr.eval_to_const()?;
+            let ts = ts_val
+                .get_int()
+                .ok_or_else(|| miette!("archive_advance_watermark requires an integer timestamp"))?;
+            SysOp::ArchiveAdvanceWatermark(rel, ts)
+        }
+        Rule::archive_op => {
+            let mut inner = inner.into_inner();
+            let rel_p = inner.next().unwrap();
+            let rel = Symbol::new(rel_p.as_str(), rel_p.extract_span());
+            let prog = parse_query(
+                inner.next().unwrap().into_inner(),
+                param_pool,
+                algorithms,
+                cur_vld,
+            )?;
+            SysOp::Archive(rel, Box::new(prog))
+        }
+        Rule::replicate_pending_op => {
+            let mut inner = inner.into_inner();
+            let rel = parse_string(inner.next().unwrap())?;
+            SysOp::ReplicatePending(rel)
         }
         Rule::list_relations_op => SysOp::ListRelations,
         Rule::remove_relations_op => {
