@@ -52,7 +52,7 @@ wasm = ["uuid/js", "dep:js-sys"]
 ## replication (local fs + S3-compatible). Pulls in `parquet`, `arrow`,
 ## `object_store`, and `tokio` so it is feature-gated to keep minimal builds
 ## (WASM, embedded) lean.
-archive = ["dep:parquet", "dep:arrow", "dep:object_store", "dep:tokio"]
+archive = ["dep:parquet", "dep:arrow", "dep:object_store", "dep:tokio", "dep:bytes"]
 ## Smoke tests that hit a real S3-compatible endpoint (Tigris, MinIO, AWS S3,
 ## R2, …). Requires AWS_* env vars and COZO_TEST_S3_BUCKET. Disabled by
 ## default so the regular `cargo test --features archive` requires no
@@ -128,7 +128,7 @@ pest_derive = "2.7.9"
 approx = "0.5.1"
 unicode-normalization = "0.1.23"
 thiserror = "1.0.59"
-uuid = { version = "1.8.0", features = ["v1", "v4", "serde"] }
+uuid = { version = "1.8.0", features = ["v1", "v4", "v5", "serde"] }
 csv = "1.3.0"
 document-features = "0.2.8"
 rayon = { version = "1.10.0", optional = true }
@@ -159,6 +159,9 @@ swapvec = "0.3.0"
 parquet = { version = "53.3.0", optional = true, default-features = false, features = ["arrow", "snap", "zstd"] }
 arrow = { version = "53.3.0", optional = true, default-features = false }
 object_store = { version = "0.11.2", optional = true, features = ["aws"] }
+# In-memory Parquet reads for S3 restore: parquet implements ChunkReader for
+# `bytes::Bytes` (and File) only. Already a transitive dep; declared explicitly.
+bytes = { version = "1", optional = true }
 
 [dev-dependencies]
 tempfile = "3.14.0"

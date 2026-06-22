@@ -234,11 +234,23 @@ impl<'a> SessionTx<'a> {
             ));
         }
 
+        // Allocate this write's commit timestamp once (durable, monotonic
+        // per-relation) when the relation has a commit_now() column. Temp
+        // stores aren't archived, so they keep the cheap wall-clock value.
+        let commit_ts = if !relation_store.is_temp
+            && relation_has_commit_now(&relation_store.metadata)
+        {
+            self.next_commit_ts(relation_store.name.as_str(), cur_vld.0 .0)?
+        } else {
+            cur_vld.0 .0
+        };
+
         let mut key_extractors = make_extractors(
             &relation_store.metadata.keys,
             &metadata.keys,
             key_bindings,
             headers,
+            commit_ts,
         )?;
 
         let need_to_collect = !force_collect.is_empty()
@@ -258,6 +270,7 @@ impl<'a> SessionTx<'a> {
                 &metadata.keys,
                 key_bindings,
                 headers,
+                commit_ts,
             )?
         } else {
             make_extractors(
@@ -265,6 +278,7 @@ impl<'a> SessionTx<'a> {
                 &metadata.non_keys,
                 dep_bindings,
                 headers,
+                commit_ts,
             )?
         };
         key_extractors.extend(val_extractors);
@@ -544,11 +558,23 @@ impl<'a> SessionTx<'a> {
             ));
         }
 
+        // Same commit-timestamp allocation as the put path: a fresh monotonic
+        // ts when the relation has a commit_now() column, so updated rows get a
+        // new timestamp and cannot be archived until re-replicated.
+        let commit_ts = if !relation_store.is_temp
+            && relation_has_commit_now(&relation_store.metadata)
+        {
+            self.next_commit_ts(relation_store.name.as_str(), cur_vld.0 .0)?
+        } else {
+            cur_vld.0 .0
+        };
+
         let key_extractors = make_extractors(
             &relation_store.metadata.keys,
             &metadata.keys,
             key_bindings,
             headers,
+            commit_ts,
         )?;
 
         let need_to_collect = !force_collect.is_empty()
@@ -567,6 +593,7 @@ impl<'a> SessionTx<'a> {
             &metadata.keys,
             key_bindings,
             headers,
+            commit_ts,
         )?;
 
         let mut stack = vec![];
@@ -813,11 +840,14 @@ impl<'a> SessionTx<'a> {
             ));
         }
 
+        // A check, not a write — never advances the commit clock; use the
+        // wall-clock value for any commit_now() key column (unchanged behavior).
         let key_extractors = make_extractors(
             &relation_store.metadata.keys,
             &metadata.keys,
             key_bindings,
             headers,
+            cur_vld.0 .0,
         )?;
 
         for tuple in res_iter {
@@ -865,6 +895,7 @@ impl<'a> SessionTx<'a> {
             &metadata.keys,
             key_bindings,
             headers,
+            cur_vld.0 .0,
         )?;
 
         let val_extractors = make_extractors(
@@ -872,6 +903,7 @@ impl<'a> SessionTx<'a> {
             &metadata.keys,
             key_bindings,
             headers,
+            cur_vld.0 .0,
         )?;
         key_extractors.extend(val_extractors);
 
@@ -938,11 +970,13 @@ impl<'a> SessionTx<'a> {
                 relation_store.access_level
             ));
         }
+        // A removal keys on existing rows — never advances the commit clock.
         let key_extractors = make_extractors(
             &relation_store.metadata.keys,
             &metadata.keys,
             key_bindings,
             headers,
+            cur_vld.0 .0,
         )?;
 
         let need_to_collect = !force_collect.is_empty()
@@ -1120,7 +1154,12 @@ struct TransactAssertionFailure {
 enum DataExtractor {
     DefaultExtractor(Expr, NullableColType),
     IndexExtractor(usize, NullableColType),
-    CommitNowExtractor(NullableColType),
+    /// Stamps a column with the commit timestamp resolved for this write. The
+    /// `i64` is the value pre-allocated by the caller via
+    /// `SessionTx::next_commit_ts` (a durable, strictly-monotonic per-relation
+    /// clock) — NOT `cur_vld`, so it cannot collide across writes. `cur_vld` is
+    /// still used for coercion only, leaving the `@`/Validity path unaffected.
+    CommitNowExtractor(NullableColType, i64),
 }
 
 impl DataExtractor {
@@ -1132,8 +1171,8 @@ impl DataExtractor {
             DataExtractor::IndexExtractor(i, typ) => typ
                 .coerce(tuple[*i].clone(), cur_vld)
                 .wrap_err_with(|| format!("when processing tuple {tuple:?}"))?,
-            DataExtractor::CommitNowExtractor(typ) => typ
-                .coerce(DataValue::from(cur_vld.0 .0), cur_vld)
+            DataExtractor::CommitNowExtractor(typ, commit_ts) => typ
+                .coerce(DataValue::from(*commit_ts), cur_vld)
                 .wrap_err_with(|| format!("when processing tuple {tuple:?}"))?,
         })
     }
@@ -1150,15 +1189,25 @@ fn is_commit_now_default(expr: &Expr) -> bool {
     )
 }
 
+/// True iff any column of `meta` carries a bare `commit_now()` default — i.e.
+/// the relation needs a freshly-allocated commit timestamp on each write.
+fn relation_has_commit_now(meta: &StoredRelationMetadata) -> bool {
+    meta.keys
+        .iter()
+        .chain(meta.non_keys.iter())
+        .any(|c| matches!(&c.default_gen, Some(e) if is_commit_now_default(e)))
+}
+
 fn make_extractors(
     stored: &[ColumnDef],
     input: &[ColumnDef],
     bindings: &[Symbol],
     tuple_headers: &[Symbol],
+    commit_ts: i64,
 ) -> Result<Vec<DataExtractor>> {
     stored
         .iter()
-        .map(|s| make_extractor(s, input, bindings, tuple_headers))
+        .map(|s| make_extractor(s, input, bindings, tuple_headers, commit_ts))
         .try_collect()
 }
 
@@ -1167,19 +1216,23 @@ fn make_update_extractors(
     input: &[ColumnDef],
     bindings: &[Symbol],
     tuple_headers: &[Symbol],
+    commit_ts: i64,
 ) -> Result<Vec<Option<DataExtractor>>> {
     let input_keys: BTreeSet<_> = input.iter().map(|b| &b.name).collect();
     let mut extractors = Vec::with_capacity(stored.len());
     for col in stored.iter() {
         if input_keys.contains(&col.name) {
-            extractors.push(Some(make_extractor(col, input, bindings, tuple_headers)?));
+            extractors.push(Some(make_extractor(col, input, bindings, tuple_headers, commit_ts)?));
         } else if matches!(&col.default_gen, Some(e) if is_commit_now_default(e)) {
             // commit_now() columns must be re-stamped on every update, even
             // when the user did not bind the column. This guarantees the
             // archive watermark stays correct after partial updates: an updated
             // row gets a fresh timestamp and so cannot be archived until the
             // replicator has uploaded the new version.
-            extractors.push(Some(DataExtractor::CommitNowExtractor(col.typing.clone())));
+            extractors.push(Some(DataExtractor::CommitNowExtractor(
+                col.typing.clone(),
+                commit_ts,
+            )));
         } else {
             extractors.push(None);
         }
@@ -1192,6 +1245,7 @@ fn make_extractor(
     input: &[ColumnDef],
     bindings: &[Symbol],
     tuple_headers: &[Symbol],
+    commit_ts: i64,
 ) -> Result<DataExtractor> {
     for (inp_col, inp_binding) in input.iter().zip(bindings.iter()) {
         if inp_col.name == stored.name {
@@ -1204,7 +1258,10 @@ fn make_extractor(
     }
     if let Some(expr) = &stored.default_gen {
         if is_commit_now_default(expr) {
-            return Ok(DataExtractor::CommitNowExtractor(stored.typing.clone()));
+            return Ok(DataExtractor::CommitNowExtractor(
+                stored.typing.clone(),
+                commit_ts,
+            ));
         }
         Ok(DataExtractor::DefaultExtractor(
             expr.clone(),

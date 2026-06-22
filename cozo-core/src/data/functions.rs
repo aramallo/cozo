@@ -2457,9 +2457,12 @@ define_op!(OP_COMMIT_NOW, 0, false);
 pub(crate) fn op_commit_now(_args: &[DataValue]) -> Result<DataValue> {
     // commit_now() is only meaningful as a column default expression of the form
     // `default commit_now()`. The put/update pipeline detects that pattern and
-    // resolves it to the current script's commit timestamp. Any other use
-    // (in a query body, in a compound default like `commit_now() + 1`, etc.)
-    // ends up here and errors so misuse is loud rather than silent.
+    // resolves it via `SessionTx::next_commit_ts` to a durable, strictly
+    // monotonic per-relation commit timestamp (a hybrid logical clock seeded
+    // from the wall clock — microsecond-scale, but collision-free and never
+    // decreasing, which the archive watermark relies on). Any other use (in a
+    // query body, in a compound default like `commit_now() + 1`, etc.) ends up
+    // here and errors so misuse is loud rather than silent.
     bail!(
         "commit_now() can only be used directly as a column default expression \
         (e.g. `ts: Int default commit_now()`); it is not callable in queries \

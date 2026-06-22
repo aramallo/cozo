@@ -74,7 +74,7 @@ background on the `COZO_ARCHIVE_SKIP_IAM_PROBE` escape hatch: see
 | `::replicate_pending '<rel>'` | Manual drain: write all rows past the watermark to a Parquet segment, advance the watermark. Idempotent. |
 | `::archive_advance_watermark '<rel>' <ts>` | Admin/test op — set the watermark directly. Slice 4's replicator advances it; this is the manual escape hatch. |
 | `::archive <rel> { <query> }` | Delete from `<rel>` the rows whose timestamp ≤ watermark. Returns `archived/skipped/missing` counts. |
-| `::import_parquet <rel> from '<path>'` | Generic Parquet importer. Used for restore but useful elsewhere. |
+| `::import_parquet <rel> from '<uri>'` | Generic Parquet importer. Accepts a local path, `file://`, or `s3://bucket/key` (restore reads back directly from object storage). |
 
 ## System relations
 
@@ -109,10 +109,24 @@ new rows is a no-op.
 
 ## Behaviour and limits (slices 1–5)
 
-- **Polling, not callback-driven.** A drain is O(N) over the relation's rows.
-  For large relations, create your own user index on the timestamp column to
-  let cozo seek by it instead of full-scanning. (An auto-index on the
-  commit timestamp column is on the roadmap.)
+- **Polling, not callback-driven.** A drain does *not* subscribe to commit
+  callbacks; each `::replicate_pending` scans for rows past the watermark.
+  If you create an index whose single leading column is the configured
+  timestamp column (`::index create rel:idx {ts_col}`), the replicator
+  **range-scans that index from the watermark** instead of full-scanning the
+  relation. Without such an index it falls back to an O(N) full scan + sort.
+- **Uploads happen outside the DB transaction.** A drain scans under a cheap
+  read snapshot, uploads segments with no lock held, then records the manifest
+  and advances the watermark in a short write transaction. A long upload no
+  longer blocks concurrent writers.
+- **Monotonic commit timestamps.** `commit_now()` is a durable, strictly
+  increasing per-relation clock (seeded from wall-clock micros), so no two
+  writes to a relation share a timestamp and the watermark gate can never
+  delete an un-replicated row at a boundary tie.
+- **Content-addressed, idempotent segments.** A segment's id and filename
+  derive from its Parquet SHA-256, so re-running a drain that failed mid-upload
+  re-PUTs identical objects and upserts the same manifest row rather than
+  creating duplicates.
 - **Direct `:rm` is not captured.** The replicator only sees rows currently
   present in the relation. If you `:rm` a row directly (i.e., bypass
   `::archive`), the row is gone from cozo without ever being replicated.
@@ -198,10 +212,12 @@ per-action IAM for any production-grade deployment.
 
 - HNSW / FTS / LSH index support: relations with these indices cannot
   currently be archived.
-- Auto-index on the commit-time column: the replicator does a full scan per
-  drain. Users with large relations should create their own index on the
-  configured timestamp column.
+- *Automatic* creation of the commit-time index: the replicator uses one if you
+  create it (`::index create rel:idx {ts_col}`), but does not create it for you.
+  Without it, a drain full-scans + sorts.
 - Direct-`:rm` capture: rows removed by `:rm` (not by `::archive`) bypass
   replication. The replicator only sees rows currently present.
 - Autonomous (background-thread) replication: only manual drain is supported
   today.
+- Streaming collection: the qualifying set is still held in memory during a
+  drain (bounded by how far behind the watermark is, not the relation size).

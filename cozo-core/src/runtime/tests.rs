@@ -1873,8 +1873,10 @@ fn commit_now_shared_across_relations_in_one_script() {
         .unwrap();
     db.run_default(r#":create b {id: Int => ts: Int default commit_now()}"#)
         .unwrap();
-    // A single imperative script writes to two relations. cur_vld is captured
-    // once for the whole script, so both relations should observe the same ts.
+    // A single imperative script writes to two relations. The per-relation
+    // commit clocks are each seeded from the same script wall-clock instant, so
+    // on their first write both observe the same ts. (After divergent history
+    // the two relations' clocks may differ — monotonicity is per-relation.)
     db.run_default(
         r#"
         {?[id] <- [[1]] :put a {id}}
@@ -2211,16 +2213,29 @@ mod import_parquet_tests {
     }
 
     #[test]
-    fn import_parquet_rejects_s3_uri() {
+    fn import_parquet_routes_s3_uri_to_object_store() {
+        // s3:// is now wired to the object store (restore path). With no real
+        // bucket/credentials in a unit test it must fail trying to *fetch* the
+        // object, NOT reject the scheme as unsupported.
         let db = DbInstance::default();
         db.run_default(r#":create r {id: Int}"#).unwrap();
         let err = db
             .run_default("::import_parquet r from 's3://bucket/key.parquet'")
             .unwrap_err()
             .to_string();
+        let lower = err.to_lowercase();
         assert!(
-            err.contains("s3") || err.to_lowercase().contains("scheme"),
-            "should reject s3:// in this slice; got: {err}"
+            !lower.contains("not supported"),
+            "s3:// should no longer be rejected as an unsupported scheme; got: {err}"
+        );
+        assert!(
+            lower.contains("objectstore")
+                || lower.contains("get")
+                || lower.contains("s3")
+                || lower.contains("bucket")
+                || lower.contains("credential")
+                || lower.contains("region"),
+            "error should indicate an S3 fetch failure; got: {err}"
         );
     }
 
@@ -2839,6 +2854,102 @@ mod replicate_tests {
             .unwrap()
             .into_json();
         assert_eq!(res["rows"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn commit_now_is_strictly_monotonic_across_writes() {
+        // Each separate :put script must get a strictly greater commit ts than
+        // the previous one, even back-to-back within one microsecond. The old
+        // wall-clock implementation could repeat a timestamp here, which would
+        // let `::archive` delete an un-replicated row at the watermark boundary.
+        let (db, _dir, _) = setup();
+        let n = 64i64;
+        for id in 0..n {
+            db.run_default(&format!("?[id, name] <- [[{id}, 'x']] :put r {{id => name}}"))
+                .unwrap();
+        }
+        let res = db.run_default("?[ts] := *r{ts}").unwrap().into_json();
+        let rows = res["rows"].as_array().unwrap();
+        assert_eq!(rows.len(), n as usize);
+        let mut seen = std::collections::HashSet::new();
+        for row in rows {
+            let ts = row[0].as_i64().unwrap();
+            assert!(seen.insert(ts), "duplicate commit_now ts {ts}: clock not monotonic");
+        }
+    }
+
+    #[test]
+    fn replicate_is_content_addressed_idempotent() {
+        let (db, _dir, _) = setup();
+        db.run_default(r#"?[id, name] <- [[1, 'a'], [2, 'b']] :put r {id => name}"#)
+            .unwrap();
+
+        db.run_default("::replicate_pending 'r'").unwrap();
+        let seg1 = db
+            .run_default("?[s] := *cozo_archive_segments{segment_id: s}")
+            .unwrap()
+            .into_json();
+        assert_eq!(seg1["rows"].as_array().unwrap().len(), 1);
+        let id1 = seg1["rows"][0][0].clone();
+
+        // Force the same rows to be due again (reset the watermark) and re-drain.
+        // Identical content must reuse the same content-addressed segment_id
+        // (an upsert), not append a duplicate manifest row.
+        db.run_default("::archive_advance_watermark 'r' 0").unwrap();
+        db.run_default("::replicate_pending 'r'").unwrap();
+
+        let seg2 = db
+            .run_default("?[s] := *cozo_archive_segments{segment_id: s}")
+            .unwrap()
+            .into_json();
+        assert_eq!(
+            seg2["rows"].as_array().unwrap().len(),
+            1,
+            "re-draining identical content must not create a duplicate segment"
+        );
+        assert_eq!(
+            seg2["rows"][0][0], id1,
+            "segment_id must be stable (content-addressed) across re-drains"
+        );
+    }
+
+    #[test]
+    fn replicate_via_timestamp_index_round_trips() {
+        // A relation WITH a timestamp index uses the index range-scan path. Prove
+        // it replicates the correct rows by restoring the segment and comparing.
+        let dir = tempdir().unwrap();
+        let dir_str = dir.path().to_str().unwrap().to_string();
+        let db = DbInstance::default();
+        db.run_default(r#":create r {id: Int => name: String, ts: Int default commit_now()}"#)
+            .unwrap();
+        db.run_default("::index create r:ts_idx {ts}").unwrap();
+        db.run_default(&format!("::archive_config put 'r' 'ts' '{dir_str}'"))
+            .unwrap();
+        db.run_default(r#"?[id, name] <- [[1, 'a'], [2, 'b'], [3, 'c']] :put r {id => name}"#)
+            .unwrap();
+
+        let res = db.run_default("::replicate_pending 'r'").unwrap().into_json();
+        assert_eq!(res["rows"][0][1], json!(3), "three rows replicated via index");
+
+        let seg = db
+            .run_default("?[f] := *cozo_archive_segments{file_path: f}")
+            .unwrap()
+            .into_json();
+        let file = seg["rows"][0][0].as_str().unwrap().to_string();
+        assert!(std::path::Path::new(&file).exists());
+
+        // Restore into a fresh relation and confirm the rows survived intact.
+        db.run_default(r#":create r2 {id: Int => name: String, ts: Int}"#)
+            .unwrap();
+        db.run_default(&format!("::import_parquet r2 from '{file}'"))
+            .unwrap();
+        let res = db
+            .run_default("?[id, name] := *r2{id, name}")
+            .unwrap()
+            .into_json();
+        let mut rows = res["rows"].as_array().unwrap().clone();
+        rows.sort_by_key(|r| r[0].as_i64().unwrap());
+        assert_eq!(rows, vec![json!([1, "a"]), json!([2, "b"]), json!([3, "c"])]);
     }
 
     #[test]
@@ -3496,21 +3607,37 @@ mod integration_s3_tests {
             .unwrap()
             .into_json();
         assert_eq!(res["rows"][0][1], json!(2), "rows replicated");
-        let s3_path = res["rows"][0][3].as_str().unwrap().to_string();
-        assert!(
-            s3_path.starts_with("s3://"),
-            "manifest s3_path should be an s3:// URI; got {s3_path}"
-        );
 
-        // Manifest record exists.
-        let res = db
+        // The segment's s3:// URI lives in the manifest (the drain summary row
+        // carries watermarks, not the path).
+        let seg = db
             .run_default(
-                "?[count, status] := *cozo_archive_segments{key_count: count, status}",
+                "?[count, status, file] := *cozo_archive_segments{\
+                    key_count: count, status, file_path: file}",
             )
             .unwrap()
             .into_json();
-        assert_eq!(res["rows"][0][0], json!(2));
-        assert_eq!(res["rows"][0][1], json!("uploaded"));
+        assert_eq!(seg["rows"][0][0], json!(2));
+        assert_eq!(seg["rows"][0][1], json!("uploaded"));
+        let s3_path = seg["rows"][0][2].as_str().unwrap().to_string();
+        assert!(
+            s3_path.starts_with("s3://"),
+            "manifest file_path should be an s3:// URI; got {s3_path}"
+        );
+
+        // True round-trip: restore directly from s3:// (4.4 — fetches the bytes
+        // via the object store and decodes in memory) and confirm the rows.
+        db.run_default(r#":create restored {id: Int => name: String, ts: Int}"#)
+            .unwrap();
+        db.run_default(&format!("::import_parquet restored from '{s3_path}'"))
+            .unwrap();
+        let res = db
+            .run_default("?[id, name] := *restored{id, name}")
+            .unwrap()
+            .into_json();
+        let mut rows = res["rows"].as_array().unwrap().clone();
+        rows.sort_by_key(|r| r[0].as_i64().unwrap());
+        assert_eq!(rows, vec![json!([1, "alice"]), json!([2, "bob"])]);
     }
 
     #[test]
@@ -3552,9 +3679,14 @@ mod integration_s3_tests {
         db.run_default(r#"?[id] <- [[1]] :put r {id}"#).unwrap();
         db.run_default("::replicate_pending 'r'").unwrap();
         // Second drain should be a no-op (no new rows past the watermark);
-        // critically, no extra S3 PUT happens.
+        // critically, no extra S3 PUT happens. Response shape is
+        // [status, rows_replicated, segments_written, old_watermark, new_watermark].
         let res = db.run_default("::replicate_pending 'r'").unwrap().into_json();
-        assert_eq!(res["rows"][0][1], json!(0));
-        assert!(res["rows"][0][3].is_null());
+        assert_eq!(res["rows"][0][1], json!(0), "no new rows");
+        assert_eq!(res["rows"][0][2], json!(0), "no new segments");
+        assert_eq!(
+            res["rows"][0][3], res["rows"][0][4],
+            "watermark unchanged on a no-op drain"
+        );
     }
 }

@@ -1306,12 +1306,21 @@ impl<'s, S: Storage<'s>> Db<S> {
                 let cur_vld = current_validity();
                 self.run_archive(tx, rel, prog, cur_vld)
             }
-            SysOp::ReplicatePending(rel) => {
+            SysOp::ReplicatePending(_rel) => {
+                // The standalone path special-cases this op in `run_sys_op` and
+                // never reaches here. This arm is hit only from an imperative
+                // block, where a transaction is already open and shared — the
+                // managed-transaction drain cannot run inside it.
                 if read_only {
                     bail!("Cannot replicate in read-only mode");
                 }
-                let cur_vld = current_validity();
-                self.run_replicate_pending(tx, rel, cur_vld)
+                #[cfg(not(feature = "archive"))]
+                bail!("archive sys ops require the 'archive' feature to be enabled");
+                #[cfg(feature = "archive")]
+                bail!(
+                    "::replicate_pending manages its own transactions and cannot run \
+                    inside an imperative block; run it as a standalone script"
+                );
             }
             SysOp::CreateIndex(rel_name, idx_name, cols) => {
                 if read_only {
@@ -1497,6 +1506,19 @@ impl<'s, S: Storage<'s>> Db<S> {
         }
     }
     fn run_sys_op(&'s self, op: SysOp, read_only: bool) -> Result<NamedRows> {
+        // `::replicate_pending` owns its transaction lifecycle (read snapshot to
+        // scan, then a short write tx to record results) so the S3 uploads in
+        // between are NOT performed inside a DB write transaction. Route it
+        // around the single wrapping transaction used by every other sys op.
+        #[cfg(feature = "archive")]
+        {
+            if let SysOp::ReplicatePending(rel) = &op {
+                if read_only {
+                    bail!("Cannot replicate in read-only mode");
+                }
+                return self.run_replicate_pending_managed(rel);
+            }
+        }
         let mut tx = if read_only {
             self.transact()?
         } else {
@@ -1529,7 +1551,9 @@ impl<'s, S: Storage<'s>> Db<S> {
 
         #[cfg(feature = "archive")]
         {
-            use crate::archive::import::{read_parquet_local, resolve_local_path};
+            use crate::archive::import::{
+                read_parquet_bytes, read_parquet_local, resolve_local_path,
+            };
 
             // Reject names that look like an index (`rel:idx`); we only import
             // into base relations.
@@ -1540,8 +1564,15 @@ impl<'s, S: Storage<'s>> Db<S> {
                 );
             }
 
-            let path = resolve_local_path(uri)?;
-            let pd = read_parquet_local(&path)?;
+            // `s3://` URIs are fetched through the object store and parsed from
+            // memory; local paths / `file://` keep the direct-file reader.
+            let pd = if uri.starts_with("s3://") {
+                let bytes = crate::archive::store::get_object_bytes(uri)?;
+                read_parquet_bytes(bytes)?
+            } else {
+                let path = resolve_local_path(uri)?;
+                read_parquet_local(&path)?
+            };
 
             let handle = tx.get_relation(rel_name.name.as_str(), false)?;
 
@@ -1604,6 +1635,31 @@ impl<'s, S: Storage<'s>> Db<S> {
             }
 
             let has_indices = !handle.indices.is_empty();
+
+            // Allocate one monotonic commit timestamp for any commit_now()
+            // column that the Parquet file omits (present columns keep the
+            // file's value). Matches the live put path's durable per-relation
+            // clock rather than the old wall-clock value.
+            let commit_ts = {
+                let needs_commit_now = handle
+                    .metadata
+                    .keys
+                    .iter()
+                    .chain(handle.metadata.non_keys.iter())
+                    .any(|c| {
+                        matches!(
+                            &c.default_gen,
+                            Some(crate::data::expr::Expr::Apply { op, args, .. })
+                                if op.name == "OP_COMMIT_NOW" && args.is_empty()
+                        )
+                    });
+                if needs_commit_now {
+                    tx.next_commit_ts(handle.name.as_str(), cur_vld.0 .0)?
+                } else {
+                    cur_vld.0 .0
+                }
+            };
+
             let mut row_count: usize = 0;
             for row in &pd.rows {
                 let resolve = |idx: Option<usize>, col: &ColumnDef| -> Result<DataValue> {
@@ -1617,15 +1673,16 @@ impl<'s, S: Storage<'s>> Db<S> {
                                 miette!("internal: no default and no value for {}", col.name)
                             })?;
                             // commit_now() refuses to evaluate as a constant by
-                            // design (slice 1); resolve it here from cur_vld
-                            // so missing-column-with-default works for the
+                            // design (slice 1); resolve it here from the
+                            // pre-allocated monotonic commit ts so
+                            // missing-column-with-default works for the
                             // archive-managed timestamp.
                             if matches!(
                                 expr,
                                 crate::data::expr::Expr::Apply { op, args, .. }
                                     if op.name == "OP_COMMIT_NOW" && args.is_empty()
                             ) {
-                                DataValue::from(cur_vld.0 .0)
+                                DataValue::from(commit_ts)
                             } else {
                                 expr.clone().eval_to_const()?
                             }
@@ -2098,42 +2155,84 @@ impl<'s, S: Storage<'s>> Db<S> {
     /// timestamp is past the watermark into one or more Parquet segments in
     /// the configured destination. Idempotent. Per-segment details (uuid,
     /// file path, ts range, sha) are queryable via `cozo_archive_segments`.
-    #[allow(unused_variables)]
-    fn run_replicate_pending(
+    ///
+    /// Runs in three phases with its own transaction lifecycle so that the
+    /// object-store uploads happen **outside** any DB transaction:
+    ///   1. read snapshot — scan the rows past the watermark,
+    ///   2. no transaction — encode + upload content-addressed segments,
+    ///   3. short write tx — record the manifest and advance the watermark.
+    #[cfg(feature = "archive")]
+    fn run_replicate_pending_managed(
         &'s self,
-        tx: &mut SessionTx<'_>,
         rel: &SmartString<LazyCompact>,
-        cur_vld: ValidityTs,
     ) -> Result<NamedRows> {
-        #[cfg(not(feature = "archive"))]
-        bail!("archive sys ops require the 'archive' feature to be enabled");
+        use crate::archive::manifest::{ensure_archive_system_relations, ARCHIVE_CONFIG_REL};
+        use crate::archive::replicator::{record_uploaded, scan_due_rows, upload_due_rows};
 
-        #[cfg(feature = "archive")]
-        {
-            use crate::archive::manifest::ensure_archive_system_relations;
-            use crate::archive::replicator::drain_relation;
+        let cur_vld = current_validity();
+        let headers = vec![
+            "status".to_string(),
+            "rows_replicated".to_string(),
+            "segments_written".to_string(),
+            "old_watermark".to_string(),
+            "new_watermark".to_string(),
+        ];
 
-            ensure_archive_system_relations(tx)?;
+        // Phase 1: scan under a cheap read snapshot, then release it.
+        let due = {
+            let read_tx = self.transact()?;
+            if !read_tx.relation_exists(ARCHIVE_CONFIG_REL)? {
+                bail!(
+                    "relation '{rel}' is not configured for archiving; run \
+                    `::archive_config put '{rel}' '<column>' '<uri>'` first"
+                );
+            }
+            scan_due_rows(&read_tx, rel.as_str())?
+        };
+        let old_watermark = due.old_watermark;
 
-            let outcome = drain_relation(tx, rel.as_str(), cur_vld)?;
-
-            Ok(NamedRows::new(
-                vec![
-                    "status".to_string(),
-                    "rows_replicated".to_string(),
-                    "segments_written".to_string(),
-                    "old_watermark".to_string(),
-                    "new_watermark".to_string(),
-                ],
+        if due.rows.is_empty() {
+            return Ok(NamedRows::new(
+                headers,
                 vec![vec![
                     DataValue::from(OK_STR),
-                    DataValue::from(outcome.rows_replicated),
-                    DataValue::from(outcome.segments_written),
-                    DataValue::from(outcome.old_watermark),
-                    DataValue::from(outcome.new_watermark),
+                    DataValue::from(0i64),
+                    DataValue::from(0i64),
+                    DataValue::from(old_watermark),
+                    DataValue::from(old_watermark),
                 ]],
-            ))
+            ));
         }
+
+        let rows_replicated = due.rows.len() as i64;
+
+        // Phase 2: upload segments with NO DB transaction held.
+        let (segments, new_watermark) = upload_due_rows(&due, rel.as_str())?;
+        let segments_written = segments.len() as i64;
+
+        // Phase 3: record the manifest + advance the watermark in a short write
+        // tx. Idempotent (content-addressed) so a failed commit can be retried.
+        let mut write_tx = self.transact_write()?;
+        ensure_archive_system_relations(&mut write_tx)?;
+        record_uploaded(
+            &mut write_tx,
+            rel.as_str(),
+            &segments,
+            new_watermark,
+            cur_vld.0 .0,
+        )?;
+        write_tx.commit_tx()?;
+
+        Ok(NamedRows::new(
+            headers,
+            vec![vec![
+                DataValue::from(OK_STR),
+                DataValue::from(rows_replicated),
+                DataValue::from(segments_written),
+                DataValue::from(old_watermark),
+                DataValue::from(new_watermark),
+            ]],
+        ))
     }
 
     /// This is the entry to query evaluation

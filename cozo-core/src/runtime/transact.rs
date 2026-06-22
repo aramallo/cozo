@@ -36,6 +36,18 @@ fn storage_version_key() -> Vec<u8> {
     storage_version_tuple.encode_as_key(RelationId::SYSTEM)
 }
 
+/// Reserved SYSTEM key holding the per-relation commit-sequence counter that
+/// backs `commit_now()`. Uses the same `[Null, "<tag>", …]` meta-namespace as
+/// [`storage_version_key`], so it never collides with user-relation data.
+fn commit_seq_key(relation: &str) -> Vec<u8> {
+    let tuple = vec![
+        DataValue::Null,
+        DataValue::from("COMMIT_SEQ"),
+        DataValue::from(relation),
+    ];
+    tuple.encode_as_key(RelationId::SYSTEM)
+}
+
 const STATUS_STR: &str = "status";
 const OK_STR: &str = "OK";
 
@@ -132,5 +144,34 @@ impl<'a> SessionTx<'a> {
     pub fn commit_tx(&mut self) -> Result<()> {
         self.store_tx.commit()?;
         Ok(())
+    }
+
+    /// Allocate the next `commit_now()` timestamp for `relation` as a durable,
+    /// strictly-monotonic per-relation hybrid logical clock:
+    /// `seq = max(stored + 1, wall_micros)`.
+    ///
+    /// Seeding from the wall clock keeps values at microsecond-since-epoch
+    /// scale, so new timestamps stay above any rows/watermarks written by the
+    /// previous wall-clock implementation (no data migration needed), while the
+    /// `+1` step guarantees strict monotonicity and collision-freedom — the
+    /// property the archive watermark relies on to never delete an
+    /// un-replicated row.
+    ///
+    /// The counter is read with `for_update = true`, so concurrent writers to
+    /// the *same* relation serialize on this key; writers to *different*
+    /// relations do not contend. Only ever called on a write transaction (the
+    /// put/update path), so the persistent store write is always legal.
+    pub(crate) fn next_commit_ts(&mut self, relation: &str, wall_micros: i64) -> Result<i64> {
+        let key = commit_seq_key(relation);
+        let prev = match self.store_tx.get(&key, true)? {
+            Some(v) if v.len() == 8 => {
+                i64::from_be_bytes(v.as_slice().try_into().expect("len checked == 8"))
+            }
+            // Absent (first write) or malformed → seed purely from wall clock.
+            _ => i64::MIN,
+        };
+        let next = wall_micros.max(prev.saturating_add(1));
+        self.store_tx.put(&key, &next.to_be_bytes())?;
+        Ok(next)
     }
 }

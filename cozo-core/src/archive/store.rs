@@ -207,58 +207,91 @@ pub(crate) fn build_object_store(
             Ok((Arc::new(lfs), dst))
         }
         BackendKind::S3 => {
-            // The AWS SDK reads `AWS_ENDPOINT_URL_S3` and `AWS_ENDPOINT_URL`;
-            // `object_store::AmazonS3Builder::from_env()` reads `AWS_ENDPOINT`
-            // (no `_URL` suffix). Bridge transparently so users with either
-            // naming convention work, and so non-AWS S3-compatible services
-            // (Tigris, R2, MinIO, Wasabi, B2) work without extra setup.
-            if std::env::var("AWS_ENDPOINT").is_err() {
-                for candidate in ["AWS_ENDPOINT_URL_S3", "AWS_ENDPOINT_URL"] {
-                    if let Ok(u) = std::env::var(candidate) {
-                        // SAFETY: setting an env var is process-wide. We only
-                        // do this for the duration of building the client; the
-                        // value we set is one we already read from the env, so
-                        // we are not introducing new state from outside the
-                        // process.
-                        std::env::set_var("AWS_ENDPOINT", u);
-                        break;
-                    }
-                }
+            let store =
+                build_s3_store(&dst, cfg.encryption.as_str(), cfg.kms_key_arn.as_deref())?;
+            Ok((store, dst))
+        }
+    }
+}
+
+/// Build an S3 `ObjectStore` for `dst` from the AWS SDK env chain, applying the
+/// requested server-side encryption mode. Shared by `build_object_store` (PUT
+/// path) and `get_object_bytes` (restore GET path).
+fn build_s3_store(
+    dst: &Destination,
+    encryption: &str,
+    kms_key_arn: Option<&str>,
+) -> Result<Arc<dyn ObjectStore>> {
+    // The AWS SDK reads `AWS_ENDPOINT_URL_S3` and `AWS_ENDPOINT_URL`;
+    // `object_store::AmazonS3Builder::from_env()` reads `AWS_ENDPOINT`
+    // (no `_URL` suffix). Bridge transparently so users with either
+    // naming convention work, and so non-AWS S3-compatible services
+    // (Tigris, R2, MinIO, Wasabi, B2) work without extra setup.
+    if std::env::var("AWS_ENDPOINT").is_err() {
+        for candidate in ["AWS_ENDPOINT_URL_S3", "AWS_ENDPOINT_URL"] {
+            if let Ok(u) = std::env::var(candidate) {
+                // SAFETY: setting an env var is process-wide. We only
+                // do this for the duration of building the client; the
+                // value we set is one we already read from the env, so
+                // we are not introducing new state from outside the
+                // process.
+                std::env::set_var("AWS_ENDPOINT", u);
+                break;
             }
+        }
+    }
 
-            let mut builder = AmazonS3Builder::from_env().with_bucket_name(&dst.bucket_or_root);
+    let mut builder = AmazonS3Builder::from_env().with_bucket_name(&dst.bucket_or_root);
 
-            // Encryption: object_store sets the appropriate header per request.
-            //
-            // The typed `S3EncryptionConfigKey` is private in object_store
-            // 0.11, so the SSE-S3 path goes via the string FromStr route
-            // (`aws_server_side_encryption`). SSE-KMS uses the dedicated
-            // typed builder method which is public.
-            match cfg.encryption.as_str() {
-                "none" => {}
-                "sse-s3" => {
-                    let key: AmazonS3ConfigKey = "aws_server_side_encryption"
-                        .parse()
-                        .into_diagnostic()
-                        .wrap_err("internal: SSE-S3 config key not recognized by object_store")?;
-                    builder = builder.with_config(key, "AES256");
-                }
-                "sse-kms" => {
-                    let kms = cfg.kms_key_arn.as_deref().ok_or_else(|| {
-                        miette::miette!("encryption='sse-kms' but kms_key_arn is missing")
-                    })?;
-                    builder = builder.with_sse_kms_encryption(kms);
-                }
-                other => bail!("internal: unrecognized encryption mode '{other}'"),
-            }
-
-            let s3 = builder
-                .build()
+    // Encryption: object_store sets the appropriate header per request.
+    //
+    // The typed `S3EncryptionConfigKey` is private in object_store
+    // 0.11, so the SSE-S3 path goes via the string FromStr route
+    // (`aws_server_side_encryption`). SSE-KMS uses the dedicated
+    // typed builder method which is public.
+    match encryption {
+        "none" => {}
+        "sse-s3" => {
+            let key: AmazonS3ConfigKey = "aws_server_side_encryption"
+                .parse()
                 .into_diagnostic()
-                .wrap_err("failed to build S3 ObjectStore — \
-                          check AWS_* env vars (AWS_ACCESS_KEY_ID, \
-                          AWS_SECRET_ACCESS_KEY, AWS_REGION, AWS_ENDPOINT)")?;
-            Ok((Arc::new(s3), dst))
+                .wrap_err("internal: SSE-S3 config key not recognized by object_store")?;
+            builder = builder.with_config(key, "AES256");
+        }
+        "sse-kms" => {
+            let kms = kms_key_arn.ok_or_else(|| {
+                miette::miette!("encryption='sse-kms' but kms_key_arn is missing")
+            })?;
+            builder = builder.with_sse_kms_encryption(kms);
+        }
+        other => bail!("internal: unrecognized encryption mode '{other}'"),
+    }
+
+    let s3 = builder
+        .build()
+        .into_diagnostic()
+        .wrap_err("failed to build S3 ObjectStore — \
+                  check AWS_* env vars (AWS_ACCESS_KEY_ID, \
+                  AWS_SECRET_ACCESS_KEY, AWS_REGION, AWS_ENDPOINT)")?;
+    Ok(Arc::new(s3))
+}
+
+/// Fetch the full bytes of the object at `uri`. Accepts the same URI shapes as
+/// [`parse_destination`] (`s3://bucket/key`, `file:///abs/path`, bare path).
+/// Used by `::import_parquet` restore. No IAM probe — this is a read, and the
+/// no-DeleteObject rule only governs the replication (write) path. Encryption
+/// settings are irrelevant for GET (S3 decrypts transparently per the object's
+/// own SSE metadata and the caller's KMS grants).
+pub(crate) fn get_object_bytes(uri: &str) -> Result<Vec<u8>> {
+    let dst = parse_destination(uri)?;
+    match dst.kind {
+        BackendKind::Local => std::fs::read(&dst.bucket_or_root)
+            .into_diagnostic()
+            .wrap_err_with(|| format!("failed to read {}", dst.bucket_or_root)),
+        BackendKind::S3 => {
+            // For a full-URI destination, `prefix` is the complete object key.
+            let store = build_s3_store(&dst, "none", None)?;
+            get_blocking(&store, &StorePath::from(dst.prefix.as_str()))
         }
     }
 }
@@ -276,9 +309,25 @@ pub(crate) fn join_path(prefix: &str, leaf: &str) -> StorePath {
     StorePath::from(combined)
 }
 
-/// Synchronous PUT of `bytes` to `path`. Spins up a current-thread tokio
-/// runtime for the call — cheap enough since `::replicate_pending` is a
-/// rare, manual op.
+/// Shared multi-thread tokio runtime backing the blocking object-store
+/// wrappers. Built once on first use rather than per call. `Runtime::block_on`
+/// takes `&self` and is safe to call concurrently from multiple OS threads
+/// (e.g. several BEAM dirty-IO schedulers each driving a drain), each blocking
+/// on its own future. Building a runtime only fails on catastrophic OS
+/// conditions (cannot spawn threads / OOM), under which the process is already
+/// doomed — hence `expect` rather than threading a `Result` through every call.
+fn rt() -> &'static tokio::runtime::Runtime {
+    static RT: std::sync::OnceLock<tokio::runtime::Runtime> = std::sync::OnceLock::new();
+    RT.get_or_init(|| {
+        tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .expect("failed to build the shared archive tokio runtime")
+    })
+}
+
+/// Synchronous PUT of `bytes` to `path`, driven on the shared runtime.
 pub(crate) fn put_blocking(
     store: &Arc<dyn ObjectStore>,
     path: &StorePath,
@@ -287,11 +336,7 @@ pub(crate) fn put_blocking(
     let store = store.clone();
     let path = path.clone();
     let payload = PutPayload::from(bytes);
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .into_diagnostic()?;
-    rt.block_on(async move {
+    rt().block_on(async move {
         store
             .put(&path, payload)
             .await
@@ -301,15 +346,11 @@ pub(crate) fn put_blocking(
     })
 }
 
-/// Synchronous GET of an object's full bytes.
+/// Synchronous GET of an object's full bytes, driven on the shared runtime.
 pub(crate) fn get_blocking(store: &Arc<dyn ObjectStore>, path: &StorePath) -> Result<Vec<u8>> {
     let store = store.clone();
     let path = path.clone();
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .into_diagnostic()?;
-    rt.block_on(async move {
+    rt().block_on(async move {
         let g = store
             .get(&path)
             .await
@@ -324,10 +365,31 @@ pub(crate) fn get_blocking(store: &Arc<dyn ObjectStore>, path: &StorePath) -> Re
     })
 }
 
+/// Process-global cache of S3 destinations whose IAM policy has already passed
+/// the no-DeleteObject probe. Keyed by `endpoint|bucket|prefix`. The probe is a
+/// `DeleteObject` round-trip; caching the pass result runs it once per
+/// destination per process instead of once per `::replicate_pending`. Only
+/// *successful* probes are cached, so a transient/network failure is retried on
+/// the next drain. The cache is per-process: if credentials are later rotated
+/// to a delete-capable role within the same process, the change is not
+/// re-probed (documented limitation).
+fn probed_ok() -> &'static std::sync::Mutex<std::collections::HashSet<String>> {
+    static PROBED_OK: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<String>>> =
+        std::sync::OnceLock::new();
+    PROBED_OK.get_or_init(|| std::sync::Mutex::new(std::collections::HashSet::new()))
+}
+
+/// Identity of an S3 destination for probe-cache purposes.
+fn dest_probe_key(dst: &Destination) -> String {
+    let endpoint = std::env::var("AWS_ENDPOINT").unwrap_or_default();
+    format!("{endpoint}|{}|{}", dst.bucket_or_root, dst.prefix)
+}
+
 /// IAM probe: confirm that the configured S3 credentials cannot
 /// `DeleteObject`. Run before the first replication to a fresh S3
 /// destination. Errors loudly if delete is permitted; that's an
-/// architectural rule.
+/// architectural rule. The pass result is cached per destination (see
+/// [`probed_ok`]).
 ///
 /// For the local backend, this is a no-op — there's no IAM to probe and
 /// `LocalFileSystem` is fully under the user's control.
@@ -362,6 +424,13 @@ pub(crate) fn iam_probe(
         return Ok(());
     }
 
+    // Already probed-and-passed this destination in this process — skip the
+    // per-drain DeleteObject round-trip.
+    let cache_key = dest_probe_key(dst);
+    if probed_ok().lock().unwrap().contains(&cache_key) {
+        return Ok(());
+    }
+
     // Pick a key that almost certainly does not exist. If DeleteObject
     // returns AccessDenied → good, our role can't delete. If it returns
     // NoSuchKey or success → bad, role has DeleteObject.
@@ -376,12 +445,8 @@ pub(crate) fn iam_probe(
     );
 
     let store = store.clone();
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .into_diagnostic()?;
     let res: std::result::Result<(), object_store::Error> =
-        rt.block_on(async move { store.delete(&probe_path).await.map(|_| ()) });
+        rt().block_on(async move { store.delete(&probe_path).await.map(|_| ()) });
 
     match res {
         Ok(()) => {
@@ -400,7 +465,9 @@ pub(crate) fn iam_probe(
                 || lower.contains("forbidden")
                 || lower.contains("403")
             {
-                // Expected outcome — credentials cannot delete. Pass.
+                // Expected outcome — credentials cannot delete. Pass, and
+                // remember so we don't re-probe this destination every drain.
+                probed_ok().lock().unwrap().insert(cache_key);
                 Ok(())
             } else if lower.contains("not found")
                 || lower.contains("nosuchkey")

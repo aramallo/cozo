@@ -14,14 +14,17 @@
 //! Column-to-stored-relation matching by name is done one layer up by the sys
 //! op handler.
 //!
-//! Slice 2 supports local filesystem URIs only (`file://...` or a bare path).
-//! S3/object_store integration is deferred to slice 5.
+//! `read_parquet_local` / `resolve_local_path` handle local paths and
+//! `file://` URIs. For `s3://` restore the sys-op layer fetches the bytes via
+//! the object store (`store::get_object_bytes`) and decodes them with
+//! `read_parquet_bytes`, so this module never needs S3 wiring itself.
 
 use std::fs::File;
 use std::path::{Path, PathBuf};
 
 use miette::{bail, IntoDiagnostic, Result, WrapErr};
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+use parquet::file::reader::ChunkReader;
 
 use crate::archive::type_mapping::arrow_value_to_data;
 use crate::data::value::DataValue;
@@ -80,10 +83,21 @@ pub(crate) fn read_parquet_local(path: &Path) -> Result<ParquetData> {
     let file = File::open(path)
         .into_diagnostic()
         .wrap_err_with(|| format!("failed to open Parquet file at {}", path.display()))?;
+    read_parquet_from(file).wrap_err_with(|| format!("invalid Parquet file at {}", path.display()))
+}
 
-    let builder = ParquetRecordBatchReaderBuilder::try_new(file)
-        .into_diagnostic()
-        .wrap_err_with(|| format!("invalid Parquet file at {}", path.display()))?;
+/// Read a Parquet segment from an in-memory byte buffer. Used for restore from
+/// an object store (`s3://`), where the bytes come from an `object_store` GET
+/// rather than the local filesystem. parquet implements `ChunkReader` for
+/// `bytes::Bytes`, so this avoids staging the segment to a temp file.
+pub(crate) fn read_parquet_bytes(bytes: Vec<u8>) -> Result<ParquetData> {
+    read_parquet_from(bytes::Bytes::from(bytes)).wrap_err("invalid Parquet data")
+}
+
+/// Shared decode core over anything parquet can read (`File`, `bytes::Bytes`).
+/// The Parquet schema's field order is preserved.
+fn read_parquet_from<R: ChunkReader + 'static>(reader: R) -> Result<ParquetData> {
+    let builder = ParquetRecordBatchReaderBuilder::try_new(reader).into_diagnostic()?;
 
     let schema = builder.schema().clone();
     let headers: Vec<String> = schema
