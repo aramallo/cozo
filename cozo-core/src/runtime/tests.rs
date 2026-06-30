@@ -1980,6 +1980,58 @@ mod import_parquet_tests {
     }
 
     #[test]
+    fn import_parquet_json_column_round_trips_through_coerce() {
+        use crate::archive::export::write_parquet_local;
+        use crate::data::relation::{ColType, ColumnDef, NullableColType};
+        use crate::data::value::{DataValue, JsonData};
+        use smartstring::SmartString;
+
+        let db = DbInstance::default();
+        db.run_default(r#":create r {id: Int => j: Json?}"#).unwrap();
+
+        let cols = vec![
+            ColumnDef {
+                name: SmartString::from("id"),
+                typing: NullableColType { coltype: ColType::Int, nullable: false },
+                default_gen: None,
+            },
+            ColumnDef {
+                name: SmartString::from("j"),
+                typing: NullableColType { coltype: ColType::Json, nullable: true },
+                default_gen: None,
+            },
+        ];
+        let payload = json!({"a": 1, "nested": {"b": [true, null]}});
+        let rows = vec![
+            vec![
+                DataValue::from(1i64),
+                DataValue::Json(JsonData(payload.clone())),
+            ],
+            vec![DataValue::from(2i64), DataValue::Null],
+        ];
+
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("r.parquet");
+        write_parquet_local(&path, &cols, &rows).unwrap();
+
+        db.run_default(&format!(
+            "::import_parquet r from '{}'",
+            path.to_str().unwrap()
+        ))
+        .unwrap();
+
+        let res = db.run_default("?[id, j] := *r{id, j}").unwrap().into_json();
+        let mut out = res["rows"].as_array().unwrap().clone();
+        out.sort_by_key(|r| r[0].as_i64().unwrap());
+        assert_eq!(out.len(), 2);
+        // The Json value must come back as the original object after coerce —
+        // NOT a double-encoded JSON *string*. If the round-trip regressed,
+        // out[0][1] would be the string "{\"a\":1,...}" and this would fail.
+        assert_eq!(out[0], json!([1, {"a": 1, "nested": {"b": [true, null]}}]));
+        assert_eq!(out[1], json!([2, null]));
+    }
+
+    #[test]
     fn import_parquet_status_row_counts_imported_rows() {
         let db = DbInstance::default();
         db.run_default(r#":create r {id: Int}"#).unwrap();

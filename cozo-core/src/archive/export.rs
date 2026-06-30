@@ -11,6 +11,7 @@
 //! Mirror of `archive::import`. Type mapping policy is symmetric: produce the
 //! Arrow type the import path knows how to read back.
 
+use std::collections::HashMap;
 use std::fs::File;
 use std::path::Path;
 use std::sync::Arc;
@@ -36,7 +37,18 @@ pub(crate) fn arrow_schema_for_columns(columns: &[ColumnDef]) -> Result<Arc<Sche
     let mut fields = Vec::with_capacity(columns.len());
     for col in columns {
         let dt = arrow_type_for(&col.typing.coltype)?;
-        fields.push(Field::new(col.name.as_str(), dt, col.typing.nullable));
+        let mut field = Field::new(col.name.as_str(), dt, col.typing.nullable);
+        // Json is carried as Arrow Utf8 (serialized JSON text). Tag the field so
+        // the import path reconstructs a DataValue::Json rather than a plain
+        // string — otherwise the Json coercion arm would re-wrap the text as a
+        // JSON string node and the round-trip would double-encode.
+        if matches!(col.typing.coltype, ColType::Json) {
+            field = field.with_metadata(HashMap::from([(
+                crate::archive::COZO_COLTYPE_META_KEY.to_string(),
+                crate::archive::COZO_COLTYPE_JSON.to_string(),
+            )]));
+        }
+        fields.push(field);
     }
     Ok(Arc::new(Schema::new(fields)))
 }
@@ -51,17 +63,22 @@ fn arrow_type_for(c: &ColType) -> Result<ArrowDataType> {
         ColType::String => ArrowDataType::Utf8,
         ColType::Bytes => ArrowDataType::Binary,
         ColType::Uuid => ArrowDataType::FixedSizeBinary(16),
+        // Json is serialized to its JSON text and stored as Utf8; the field
+        // carries a `cozo:coltype=json` tag (see arrow_schema_for_columns) so
+        // the import path knows to parse it back rather than treat it as a
+        // plain string.
+        ColType::Json => ArrowDataType::Utf8,
         ColType::List { eltype, .. } => {
             let inner = arrow_type_for(&eltype.coltype)?;
             ArrowDataType::List(Arc::new(Field::new("item", inner, eltype.nullable)))
         }
-        // Slice 4 deliberately limits its type coverage. Anything not in the
-        // list above yields a clear unsupported-type error rather than a
-        // surprise round-trip failure.
+        // Type coverage is deliberately limited. Anything not in the list above
+        // yields a clear unsupported-type error rather than a surprise
+        // round-trip failure.
         other => bail!(
-            "exporting cozo type {:?} to Parquet is not supported in slice 4; \
+            "exporting cozo type {:?} to Parquet is not supported; \
             supported types are: Bool, Int, Float, String, Bytes, Uuid, \
-            Validity, and List of those",
+            Validity, Json, and List of those (except List of Json)",
             other
         ),
     })
@@ -161,6 +178,19 @@ fn build_array_for(
                     DataValue::Uuid(w) => b.append_value(w.0.as_bytes()).into_diagnostic()?,
                     DataValue::Null => b.append_null(),
                     other => bail!("expected Uuid, got {:?}", other),
+                }
+            }
+            Ok(Arc::new(b.finish()))
+        }
+        ColType::Json => {
+            // Serialize each JSON value to its compact text form. The stored
+            // value for a Json column is always DataValue::Json after coercion.
+            let mut b = StringBuilder::with_capacity(rows.len(), rows.len() * 32);
+            for row in rows {
+                match &row[col_idx] {
+                    DataValue::Json(j) => b.append_value(j.0.to_string()),
+                    DataValue::Null => b.append_null(),
+                    other => bail!("expected Json, got {:?}", other),
                 }
             }
             Ok(Arc::new(b.finish()))
@@ -363,18 +393,37 @@ mod tests {
     }
 
     #[test]
-    fn unsupported_type_errors() {
-        let cols = vec![col(
-            "j",
-            ColType::Json,
-            false,
-        )];
-        let rows = vec![vec![DataValue::Null]];
+    fn round_trip_json() {
+        use crate::data::value::JsonData;
+        let cols = vec![col("j", ColType::Json, true)];
+        let v1 = serde_json::json!({"a": 1, "b": [true, "x"], "c": null});
+        let rows: Vec<Vec<DataValue>> = vec![
+            vec![DataValue::Json(JsonData(v1.clone()))],
+            vec![DataValue::Null],
+        ];
         let dir = tempdir().unwrap();
         let path = dir.path().join("j.parquet");
+        write_parquet_local(&path, &cols, &rows).unwrap();
+
+        let pd = read_parquet_local(&path).unwrap();
+        assert_eq!(pd.rows.len(), 2);
+        match &pd.rows[0][0] {
+            DataValue::Json(j) => assert_eq!(j.0, v1),
+            other => panic!("expected Json, got {other:?}"),
+        }
+        assert_eq!(pd.rows[1][0], DataValue::Null);
+    }
+
+    #[test]
+    fn unsupported_type_errors() {
+        // `Any` has no fixed Arrow representation, so it remains unsupported.
+        let cols = vec![col("a", ColType::Any, false)];
+        let rows = vec![vec![DataValue::from(1i64)]];
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("a.parquet");
         let err = write_parquet_local(&path, &cols, &rows).unwrap_err().to_string();
         assert!(
-            err.contains("not supported") || err.contains("Json"),
+            err.contains("not supported") || err.contains("Any"),
             "got: {err}"
         );
     }

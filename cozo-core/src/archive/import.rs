@@ -105,6 +105,19 @@ fn read_parquet_from<R: ChunkReader + 'static>(reader: R) -> Result<ParquetData>
         .iter()
         .map(|f| f.name().clone())
         .collect();
+    // Columns tagged as cozo Json (stored as Utf8 text) must be parsed back
+    // into DataValue::Json; without this they'd import as plain strings and the
+    // Json coercion arm would re-wrap them as JSON string nodes.
+    let json_cols: Vec<bool> = schema
+        .fields()
+        .iter()
+        .map(|f| {
+            f.metadata()
+                .get(crate::archive::COZO_COLTYPE_META_KEY)
+                .map(|v| v == crate::archive::COZO_COLTYPE_JSON)
+                .unwrap_or(false)
+        })
+        .collect();
 
     let reader = builder.build().into_diagnostic()?;
 
@@ -117,18 +130,42 @@ fn read_parquet_from<R: ChunkReader + 'static>(reader: R) -> Result<ParquetData>
             let mut row = Vec::with_capacity(n_cols);
             for c in 0..n_cols {
                 let arr = batch.column(c);
-                row.push(arrow_value_to_data(arr, r).wrap_err_with(|| {
-                    format!(
-                        "while decoding column '{}' row {}",
-                        headers[c], r
-                    )
-                })?);
+                let mut value = arrow_value_to_data(arr, r).wrap_err_with(|| {
+                    format!("while decoding column '{}' row {}", headers[c], r)
+                })?;
+                if json_cols[c] {
+                    value = reconstruct_json(value).wrap_err_with(|| {
+                        format!("while decoding Json column '{}' row {}", headers[c], r)
+                    })?;
+                }
+                row.push(value);
             }
             rows.push(row);
         }
     }
 
     Ok(ParquetData { headers, rows })
+}
+
+/// Reconstruct a `DataValue::Json` from the Utf8 text produced by the export
+/// path for a Json-tagged column. Nulls pass through. Invalid JSON is a hard
+/// error: the exporter only ever writes serialized JSON here, so non-JSON text
+/// signals a corrupt or mis-tagged segment.
+fn reconstruct_json(v: DataValue) -> Result<DataValue> {
+    use crate::data::value::JsonData;
+    match v {
+        DataValue::Null => Ok(DataValue::Null),
+        DataValue::Str(s) => {
+            let jv: serde_json::Value = serde_json::from_str(&s)
+                .into_diagnostic()
+                .wrap_err("Json-tagged column contained text that is not valid JSON")?;
+            Ok(DataValue::Json(JsonData(jv)))
+        }
+        other => bail!(
+            "expected Utf8 text for a Json-tagged column, got {:?}",
+            other
+        ),
+    }
 }
 
 #[cfg(test)]

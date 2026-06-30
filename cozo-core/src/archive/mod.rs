@@ -15,6 +15,19 @@
 pub(crate) mod export;
 #[cfg(feature = "archive")]
 pub(crate) mod import;
+
+/// Arrow field-metadata key tagging a column with its originating cozo
+/// `ColType` when the Arrow type alone is lossy. Currently only `Json` needs
+/// it: a Json column is stored as Arrow `Utf8` holding the serialized JSON
+/// text, and this tag tells the import path to parse that text back into a
+/// `DataValue::Json` instead of leaving it as a plain string (which the
+/// `Json` coercion arm would then re-wrap as a JSON *string* node).
+#[cfg(feature = "archive")]
+pub(crate) const COZO_COLTYPE_META_KEY: &str = "cozo:coltype";
+/// Metadata value paired with [`COZO_COLTYPE_META_KEY`] for Json columns.
+#[cfg(feature = "archive")]
+pub(crate) const COZO_COLTYPE_JSON: &str = "json";
+
 #[cfg(feature = "archive")]
 pub(crate) mod manifest;
 #[cfg(feature = "archive")]
